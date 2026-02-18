@@ -52,8 +52,9 @@ class GPT2Layer(nn.Module):
         """
 
         ### YOUR CODE HERE
-
+        # Attention before attention
         attn_in = self.attention_layer_norm(hidden_states)
+
         attn_out = self.self_attention(attn_in, attention_mask)
 
         residual_x = self.add(
