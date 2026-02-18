@@ -21,6 +21,11 @@ class CausalSelfAttention(nn.Module):
         # observe that it yields better performance.
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        ## Added linear head for attention
+        # linear_head = torch.nn.Linear(
+        #    config.hidden_size, config.hidden_size, bias=False
+        # )
+
     def transform(self, x, linear_layer):
         # The corresponding linear_layer of k, v, q are used to project the hidden_state (x).
         proj = linear_layer(x)
@@ -32,9 +37,7 @@ class CausalSelfAttention(nn.Module):
         return proj
 
     def attention(self, key, query, value, attention_mask):
-
         ### YOUR CODE HERE
-
         masked_weights = (
             query
             @ torch.transpose(key, -2, -1)
@@ -44,7 +47,16 @@ class CausalSelfAttention(nn.Module):
 
         softmax_weights = torch.softmax(masked_weights, dim=-1)
 
-        raise softmax_weights @ value
+        softmax_weights = self.dropout(softmax_weights)
+
+        attn_out = softmax_weights @ value
+        out = rearrange(attn_out, "b h t d -> b t (h d)")  # concatenation
+
+        _, _, d = out.shape()
+
+        # out = self.linear_head(out)
+        # out = self.dropout(out)
+        return out
 
     def forward(self, hidden_states, attention_mask):
         """
