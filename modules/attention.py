@@ -1,5 +1,5 @@
 import torch
-
+import math
 from einops import rearrange
 from torch import nn
 
@@ -38,12 +38,8 @@ class CausalSelfAttention(nn.Module):
 
     def attention(self, key, query, value, attention_mask):
         ### YOUR CODE HERE
-        masked_weights = (
-            query
-            @ torch.transpose(key, -2, -1)
-            / torch.sqrt(self.attention_head_size)
-            @ attention_mask
-        )
+        masked_weights = (query @ torch.transpose(key, -2, -1)) / math.sqrt(self.attention_head_size)
+        masked_weights = masked_weights * attention_mask
 
         softmax_weights = torch.softmax(masked_weights, dim=-1)
 
@@ -51,11 +47,6 @@ class CausalSelfAttention(nn.Module):
 
         attn_out = softmax_weights @ value
         out = rearrange(attn_out, "b h t d -> b t (h d)")  # concatenation
-
-        _, _, d = out.shape()
-
-        # out = self.linear_head(out)
-        # out = self.dropout(out)
         return out
 
     def forward(self, hidden_states, attention_mask):
