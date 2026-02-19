@@ -73,4 +73,25 @@ class AdamW(Optimizer):
                 ###       Refer to the default project handout for more details.
                 ### YOUR CODE HERE
 
+                moments_1, moments_2 = [0], [0]
+                t = 0
+                err = float("inf")
+                eps = 0
+                while err > eps:
+                    t += 1
+                    g_t = grad[t]
+                    m = self.betas[0] * moments_1[-1] + (1 - self.betas[0]) * g_t
+                    v = self.betas[1] * moments_2[-1] + (1 - self.betas[1]) * g_t**2
+
+                    moments_1 += [m]
+                    moments_2 += [v]
+
+                    self.lr = (
+                        self.lr
+                        * float.sqrt(1 - self.betas[1] ** t)
+                        / (1 - self.betas[0] ** t)
+                    )
+
+                    err = err - self.lr * m / (float.sqrt(v) + self.eps)
+
         return loss
