@@ -54,8 +54,18 @@ class AdamW(Optimizer):
                 # State should be stored in this dictionary.
                 state = self.state[p]
 
+                if len(state) == 0:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p.data)
+                    state["exp_avg_sq"] = torch.zeros_like(p.data)
+
                 # Access hyperparameters from the `group` dictionary.
+                exp_avg = state["exp_avg"]
+                exp_avg_sq = state["exp_avg_sq"]
                 alpha = group["lr"]
+                beta1, beta2 = group["betas"]
+                eps = group["eps"]
+                weight_decay = group["weight_decay"]
 
                 ### TODO: Complete the implementation of AdamW here, reading and saving
                 ###       your state in the `state` dictionary above.
@@ -73,25 +83,20 @@ class AdamW(Optimizer):
                 ###       Refer to the default project handout for more details.
                 ### YOUR CODE HERE
 
-                moments_1, moments_2 = [0], [0]
-                t = 0
-                err = float("inf")
-                eps = 0
-                while err > eps:
-                    t += 1
-                    g_t = grad[t]
-                    m = self.betas[0] * moments_1[-1] + (1 - self.betas[0]) * g_t
-                    v = self.betas[1] * moments_2[-1] + (1 - self.betas[1]) * g_t**2
+                state["step"] += 1
+                t = state["step"]
 
-                    moments_1 += [m]
-                    moments_2 += [v]
+                exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                    self.lr = (
-                        self.lr
-                        * float.sqrt(1 - self.betas[1] ** t)
-                        / (1 - self.betas[0] ** t)
-                    )
+                bias_correction1 = 1.0 - beta1 ** t
+                bias_correction2 = 1.0 - beta2 ** t
+                alpha_t = alpha * (bias_correction2 ** 0.5) / bias_correction1
 
-                    err = err - self.lr * m / (float.sqrt(v) + self.eps)
+                denom_update = exp_avg_sq.sqrt().add_(eps)
+                p.data.addcdiv_(exp_avg, denom_update, value=-alpha_t)
+
+                if weight_decay != 0:
+                    p.data = p.data - alpha * weight_decay * p.data
 
         return loss
