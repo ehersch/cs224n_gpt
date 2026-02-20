@@ -86,6 +86,7 @@ class AdamW(Optimizer):
                 state["step"] += 1
                 t = state["step"]
 
+                # Use built in pytorch functions to not copy every time
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 

@@ -36,7 +36,6 @@ class GPT2Layer(nn.Module):
         """
         ### YOUR CODE HERE
         linear_attn_out = dense_layer(output)
-
         dropout_x = dropout(linear_attn_out)
         residual_x = dropout_x + input
 
@@ -58,16 +57,15 @@ class GPT2Layer(nn.Module):
         attn_out = self.self_attention(attn_in, attention_mask)
 
         residual_x = self.add(
-            attn_in, attn_out, self.attention_dense, self.attention_dropout
+            hidden_states, attn_out, self.attention_dense, self.attention_dropout
         )
 
         # LayerNorm
-        ln_x = self.out_layer_norm(residual_x)
+        ff_in = self.out_layer_norm(residual_x)
 
         # FeedForward
-        interim_x = self.interm_dense(ln_x)
+        interim_x = self.interm_dense(ff_in)
         x = self.interm_af(interim_x)
-        x = self.out_dense(x)
+        out = self.add(residual_x, x, self.out_dense, self.out_dropout)
 
-        out = self.out_dropout(x)
         return out

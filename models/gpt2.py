@@ -120,7 +120,7 @@ class GPT2Model(GPTPreTrainedModel):
           return hidden_state(s) * E^T
         """
         ### YOUR CODE HERE
-        return hidden_state @ self.word_embedding.T
+        return hidden_state @ self.word_embedding.weight.t()
 
     @classmethod
     def from_pretrained(cls, model="gpt2", d=768, l=12, num_heads=12):
