@@ -90,9 +90,9 @@ class AdamW(Optimizer):
                 exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
 
-                bias_correction1 = 1.0 - beta1 ** t
-                bias_correction2 = 1.0 - beta2 ** t
-                alpha_t = alpha * (bias_correction2 ** 0.5) / bias_correction1
+                bias_correction1 = 1.0 - beta1**t
+                bias_correction2 = 1.0 - beta2**t
+                alpha_t = alpha * (bias_correction2**0.5) / bias_correction1
 
                 denom_update = exp_avg_sq.sqrt().add_(eps)
                 p.data.addcdiv_(exp_avg, denom_update, value=-alpha_t)

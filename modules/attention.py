@@ -33,7 +33,18 @@ class CausalSelfAttention(nn.Module):
 
     def attention(self, key, query, value, attention_mask):
         ### YOUR CODE HERE
-        masked_weights = (query @ torch.transpose(key, -2, -1)) / math.sqrt(self.attention_head_size)
+        weights = (query @ torch.transpose(key, -2, -1)) / math.sqrt(
+            self.attention_head_size
+        )
+
+        t = weights.size(-1)
+        causal_mask = torch.tril(torch.ones((t, t), dtype=torch.bool))
+        # ~ is logical not operator
+        masked_weights = weights.masked_fill(
+            ~causal_mask, torch.finfo(weights.dtype).min
+        )
+
+        # passing mask PLUS causal mask
         masked_weights = masked_weights + attention_mask
 
         softmax_weights = torch.softmax(masked_weights, dim=-1)
