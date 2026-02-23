@@ -21,6 +21,7 @@ image = (
     )
 )
 
+# Change this for each task you want to do
 volume = modal.Volume.from_name("cs224n-checkpoints", create_if_missing=True)
 
 app = modal.App("gpt_scratch")
@@ -538,52 +539,3 @@ def main(
     train.remote(config)
     print("Evaluating on cfimdb...")
     test.remote(config)
-
-
-"""
-if __name__ == "__main__":
-    args = get_args()
-    seed_everything(args.seed)
-
-    print("Training Sentiment Classifier on SST...")
-    config = SimpleNamespace(
-        filepath="sst-classifier.pt",
-        lr=args.lr,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train="data/ids-sst-train.csv",
-        dev="data/ids-sst-dev.csv",
-        test="data/ids-sst-test-student.csv",
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out="predictions/" + args.fine_tune_mode + "-sst-dev-out.csv",
-        test_out="predictions/" + args.fine_tune_mode + "-sst-test-out.csv",
-    )
-
-    train(config)
-
-    print("Evaluating on SST...")
-    test(config)
-
-    print("Training Sentiment Classifier on cfimdb...")
-    config = SimpleNamespace(
-        filepath="cfimdb-classifier.pt",
-        lr=args.lr,
-        use_gpu=args.use_gpu,
-        epochs=args.epochs,
-        batch_size=8,
-        hidden_dropout_prob=args.hidden_dropout_prob,
-        train="data/ids-cfimdb-train.csv",
-        dev="data/ids-cfimdb-dev.csv",
-        test="data/ids-cfimdb-test-student.csv",
-        fine_tune_mode=args.fine_tune_mode,
-        dev_out="predictions/" + args.fine_tune_mode + "-cfimdb-dev-out.csv",
-        test_out="predictions/" + args.fine_tune_mode + "-cfimdb-test-out.csv",
-    )
-
-    train(config)
-
-    print("Evaluating on cfimdb...")
-    test(config)
-"""
