@@ -37,8 +37,12 @@ class CausalSelfAttention(nn.Module):
             self.attention_head_size
         )
 
+        attention_mask = attention_mask.to(weights.device)
+
         t = weights.size(-1)
-        causal_mask = torch.tril(torch.ones((t, t), dtype=torch.bool))
+        causal_mask = torch.tril(
+            torch.ones((t, t), dtype=torch.bool, device=weights.device)
+        )
         # ~ is logical not operator
         masked_weights = weights.masked_fill(
             ~causal_mask, torch.finfo(weights.dtype).min

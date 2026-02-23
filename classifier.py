@@ -1,5 +1,29 @@
-#!/usr/bin/env python3
+import modal
 
+image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .pip_install_from_requirements("requirements.txt")
+    .add_local_dir(
+        ".",
+        remote_path="/root",
+        ignore=[
+            ".venv",
+            "__pycache__",
+            ".git",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".DS_Store",
+            "wandb",
+            "runs",
+            "checkpoints",
+            "logs",
+        ],
+    )
+)
+
+volume = modal.Volume.from_name("cs224n-checkpoints", create_if_missing=True)
+
+app = modal.App("gpt_scratch")
 """
 Trains and evaluates GPT2SentimentClassifier on SST and CFIMDB
 """
@@ -15,6 +39,7 @@ from transformers import GPT2Tokenizer
 from sklearn.metrics import f1_score, accuracy_score
 
 from models.gpt2 import GPT2Model
+
 from optimizer import AdamW
 from tqdm import tqdm
 
@@ -259,7 +284,21 @@ def save_model(model, optimizer, args, config, filepath):
     print(f"save the model to {filepath}")
 
 
+@app.function(
+    gpu="T4:1",
+    image=image,
+    include_source=True,
+    timeout=60 * 60 * 2,  # 2 hours
+    volumes={"/root/ckpts": volume},
+)
 def train(args):
+    import os, sys
+
+    # sys.path.insert(0, os.getcwd())
+
+    from models.gpt2 import GPT2Model
+    from optimizer import AdamW
+
     device = torch.device("cuda") if args.use_gpu else torch.device("cpu")
     # Create the data and its corresponding datasets and dataloader.
     train_data, num_labels = load_data(args.train, "train")
@@ -342,12 +381,29 @@ def train(args):
         print(
             f"Epoch {epoch}: train loss :: {train_loss :.3f}, train acc :: {train_acc :.3f}, dev acc :: {dev_acc :.3f}"
         )
+    volume.commit()
 
 
+@app.function(
+    gpu="T4:1",
+    image=image,
+    include_source=True,
+    timeout=60 * 60 * 2,  # 2 hours
+    volumes={"/root/ckpts": volume},
+)
 def test(args):
+    import os, sys
+
+    sys.path.insert(0, os.getcwd())
+
+    from models.gpt2 import GPT2Model
+    from optimizer import AdamW
+
+    os.makedirs(os.path.dirname(args.dev_out), exist_ok=True)
+
     with torch.no_grad():
         device = torch.device("cuda") if args.use_gpu else torch.device("cpu")
-        saved = torch.load(args.filepath)
+        saved = torch.load(args.filepath, map_location=device, weights_only=False)
         config = saved["model_config"]
         model = GPT2SentimentClassifier(config)
         model.load_state_dict(saved["model"])
@@ -382,6 +438,10 @@ def test(args):
         )
         print("DONE Test")
 
+        import os
+
+        os.makedirs("predictions", exist_ok=True)
+
         with open(args.dev_out, "w+") as f:
             print(f"dev acc :: {dev_acc :.3f}")
             f.write(f"id \t Predicted_Sentiment \n")
@@ -392,6 +452,8 @@ def test(args):
             f.write(f"id \t Predicted_Sentiment \n")
             for p, s in zip(test_sent_ids, test_pred):
                 f.write(f"{p}, {s} \n")
+
+    volume.commit()
 
 
 def get_args():
@@ -425,6 +487,60 @@ def get_args():
     return args
 
 
+@app.local_entrypoint()
+def main(
+    seed: int = 11711,
+    epochs: int = 10,
+    fine_tune_mode: str = "last-linear-layer",
+    use_gpu: bool = True,
+    batch_size: int = 8,
+    hidden_dropout_prob: float = 0.3,
+    lr: float = 1e-3,
+):
+    seed_everything(seed)
+
+    print("Training Sentiment Classifier on SST...")
+    config = SimpleNamespace(
+        filepath="/root/ckpts/sst-classifier.pt",  # "sst-classifier.pt",
+        lr=lr,
+        use_gpu=use_gpu,
+        epochs=epochs,
+        batch_size=batch_size,
+        hidden_dropout_prob=hidden_dropout_prob,
+        train="data/ids-sst-train.csv",
+        dev="data/ids-sst-dev.csv",
+        test="data/ids-sst-test-student.csv",
+        fine_tune_mode=fine_tune_mode,
+        dev_out="/root/ckpts/predictions/" + fine_tune_mode + "-sst-dev-out.csv",
+        test_out="/root/ckpts/predictions/" + fine_tune_mode + "-sst-test-out.csv",
+    )
+
+    train.remote(config)
+    print("Evaluating on SST...")
+    test.remote(config)
+
+    print("Training Sentiment Classifier on cfimdb...")
+    config = SimpleNamespace(
+        filepath="/root/ckpts/cfimdb-classifier.pt",  # "cfimdb-classifier.pt",
+        lr=lr,
+        use_gpu=use_gpu,
+        epochs=epochs,
+        batch_size=8,
+        hidden_dropout_prob=hidden_dropout_prob,
+        train="data/ids-cfimdb-train.csv",
+        dev="data/ids-cfimdb-dev.csv",
+        test="data/ids-cfimdb-test-student.csv",
+        fine_tune_mode=fine_tune_mode,
+        dev_out="/root/ckpts/predictions/" + fine_tune_mode + "-cfimdb-dev-out.csv",
+        test_out="/root/ckpts/predictions/" + fine_tune_mode + "-cfimdb-test-out.csv",
+    )
+
+    train.remote(config)
+    print("Evaluating on cfimdb...")
+    test.remote(config)
+
+
+"""
 if __name__ == "__main__":
     args = get_args()
     seed_everything(args.seed)
@@ -470,3 +586,4 @@ if __name__ == "__main__":
 
     print("Evaluating on cfimdb...")
     test(config)
+"""
