@@ -68,7 +68,8 @@ class GPT2SentimentClassifier(torch.nn.Module):
         ### YOUR CODE HERE
 
         gpt_embedding = self.gpt(input_ids, attention_mask)
-        unnormalized_logits = self.classifier(gpt_embedding)
+
+        unnormalized_logits = self.classifier(gpt_embedding["last_token"])
         # F.cross_entropy implicitly applies softmax, so don't normalize logits
         # logits = torch.nn.Softmax(unnormalized_logits)
         return unnormalized_logits
