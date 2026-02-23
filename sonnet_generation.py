@@ -5,6 +5,9 @@ Running:
   `python sonnet_generation.py --use_gpu`
 
 trains your SonnetGPT model and writes the required submission files.
+
+With LoRA (fewer params, often better for small datasets):
+  `python sonnet_generation.py --use_gpu --use_lora`
 '''
 
 import argparse
@@ -24,6 +27,7 @@ from datasets import (
   SonnetsDataset,
 )
 from models.gpt2 import GPT2Model
+from modules.lora import LoRALinear
 
 from optimizer import AdamW
 
@@ -41,18 +45,38 @@ def seed_everything(seed=11711):
   torch.backends.cudnn.deterministic = True
 
 
+def _apply_lora_to_gpt(gpt, rank, alpha):
+  """Freeze base GPT and wrap target linear layers with LoRA."""
+  for param in gpt.parameters():
+    param.requires_grad = False
+
+  for layer in gpt.gpt_layers:
+    # Attention: Q, K, V
+    layer.self_attention.query = LoRALinear(layer.self_attention.query, rank=rank, alpha=alpha)
+    layer.self_attention.key = LoRALinear(layer.self_attention.key, rank=rank, alpha=alpha)
+    layer.self_attention.value = LoRALinear(layer.self_attention.value, rank=rank, alpha=alpha)
+    # Attention output
+    layer.attention_dense = LoRALinear(layer.attention_dense, rank=rank, alpha=alpha)
+    # MLP
+    layer.interm_dense = LoRALinear(layer.interm_dense, rank=rank, alpha=alpha)
+    layer.out_dense = LoRALinear(layer.out_dense, rank=rank, alpha=alpha)
+
+
 class SonnetGPT(nn.Module):
-  """Your GPT-2 Model designed for paraphrase detection."""
+  """Your GPT-2 Model designed for sonnet generation."""
 
   def __init__(self, args):
     super().__init__()
     self.gpt = GPT2Model.from_pretrained(model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
     self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     self.tokenizer.pad_token = self.tokenizer.eos_token
+    self.use_lora = getattr(args, 'use_lora', False)
 
-    # By default, fine-tune the full model. TODO: this is maybe not idea.
-    for param in self.gpt.parameters():
-      param.requires_grad = True
+    if self.use_lora:
+      _apply_lora_to_gpt(self.gpt, rank=args.lora_rank, alpha=args.lora_alpha)
+    else:
+      for param in self.gpt.parameters():
+        param.requires_grad = True
 
   def forward(self, input_ids, attention_mask):
     """
@@ -61,60 +85,103 @@ class SonnetGPT(nn.Module):
     not just the distribution over next tokens for the last token!
     """
     ### YOUR CODE HERE
-    raise NotImplementedError
+    gpt_output = self.gpt(input_ids, attention_mask)
+    last_hidden_state = gpt_output['last_hidden_state']
+    logits = self.gpt.hidden_state_to_token(last_hidden_state)
+    return logits
 
 
   def get_device(self):
     for param in self.gpt.parameters():
       return param.device
 
+  # @torch.no_grad()
+  # def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=128):
+  #   """
+  #   Generates an original sonnet using top-p sampling and softmax temperature.
+
+  #   TODO: this is probably not ideal. You can look at hugging face's model.generate(...) function for inspiration.
+  #   In particular, generating multiple sequences and choosing the best with beam search is one avenue. Top_k is another;
+  #   there are many.
+  #   """
+  #   token_ids = encoding.to(self.get_device())
+  #   attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
+
+
+  #   for _ in range(max_length):
+  #     # Forward pass to get logits
+  #     logits_sequence = self.forward(token_ids, attention_mask)
+  #     logits_last_token = logits_sequence[:, -1, :] / temperature  # Apply temperature scaling
+
+  #     # Convert logits to probabilities
+  #     probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
+
+  #     # Top-p (nucleus) sampling
+  #     sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+  #     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+  #     top_p_mask = cumulative_probs <= top_p
+  #     top_p_mask[..., 1:] = top_p_mask[..., :-1].clone()  # Shift mask right for proper thresholding
+  #     top_p_mask[..., 0] = True  # Always include the highest probability token
+  #     filtered_probs = sorted_probs * top_p_mask  # Zero out unlikely tokens
+  #     filtered_probs /= filtered_probs.sum(dim=-1, keepdim=True)  # Normalize probabilities
+
+  #     # Sample from filtered distribution
+  #     sampled_index = torch.multinomial(filtered_probs, 1)
+  #     sampled_token = sorted_indices.gather(dim=-1, index=sampled_index)
+
+  #     # Stop if end-of-sequence token is reached
+  #     if sampled_token.item() == self.tokenizer.eos_token_id:
+  #       break
+
+  #     # Append sampled token
+  #     token_ids = torch.cat([token_ids, sampled_token], dim=1)
+  #     attention_mask = torch.cat(
+  #       [attention_mask, torch.ones((1, 1), dtype=torch.int64).to(self.get_device())], dim=1
+  #     )
+
+  #   generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
+  #   return token_ids, generated_output
+
   @torch.no_grad()
-  def generate(self, encoding, temperature=0.7, top_p=0.9, max_length=128):
+  def generate(self, encoding, temperature=0.8, top_p=0.9, top_k=40, max_length=128):
     """
-    Generates an original sonnet using top-p sampling and softmax temperature.
-
-    TODO: this is probably not ideal. You can look at hugging face's model.generate(...) function for inspiration.
-    In particular, generating multiple sequences and choosing the best with beam search is one avenue. Top_k is another;
-    there are many.
+    Generates a sonnet using optimized Top-K and Top-P (Nucleus) sampling.
     """
-    token_ids = encoding.to(self.get_device())
-    attention_mask = torch.ones(token_ids.shape, dtype=torch.int64).to(self.get_device())
-
+    model_device = self.get_device()
+    token_ids = encoding.to(model_device)
+    if token_ids.dim() == 1:
+        token_ids = token_ids.unsqueeze(0)
+    current_ids = token_ids
 
     for _ in range(max_length):
-      # Forward pass to get logits
-      logits_sequence = self.forward(token_ids, attention_mask)
-      logits_last_token = logits_sequence[:, -1, :] / temperature  # Apply temperature scaling
+        attention_mask = torch.ones_like(current_ids).to(model_device)
+        logits = self.forward(current_ids, attention_mask)
+        next_token_logits = logits[:, -1, :] / max(temperature, 1e-5)
+        if top_k > 0:
+            indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+            next_token_logits[indices_to_remove] = float('-inf')
 
-      # Convert logits to probabilities
-      probs = torch.nn.functional.softmax(logits_last_token, dim=-1)
+        # Top-P (nucleus) sampling
+        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
-      # Top-p (nucleus) sampling
-      sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-      cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-      top_p_mask = cumulative_probs <= top_p
-      top_p_mask[..., 1:] = top_p_mask[..., :-1].clone()  # Shift mask right for proper thresholding
-      top_p_mask[..., 0] = True  # Always include the highest probability token
-      filtered_probs = sorted_probs * top_p_mask  # Zero out unlikely tokens
-      filtered_probs /= filtered_probs.sum(dim=-1, keepdim=True)  # Normalize probabilities
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
 
-      # Sample from filtered distribution
-      sampled_index = torch.multinomial(filtered_probs, 1)
-      sampled_token = sorted_indices.gather(dim=-1, index=sampled_index)
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        next_token_logits[indices_to_remove] = float('-inf')
 
-      # Stop if end-of-sequence token is reached
-      if sampled_token.item() == self.tokenizer.eos_token_id:
-        break
+        probs = F.softmax(next_token_logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
 
-      # Append sampled token
-      token_ids = torch.cat([token_ids, sampled_token], dim=1)
-      attention_mask = torch.cat(
-        [attention_mask, torch.ones((1, 1), dtype=torch.int64).to(self.get_device())], dim=1
-      )
+        current_ids = torch.cat([current_ids, next_token], dim=-1)
+        
+        if next_token.item() == self.tokenizer.eos_token_id:
+            break
 
-    generated_output = self.tokenizer.decode(token_ids[0].cpu().numpy().tolist())[3:]
-    return token_ids, generated_output
-
+    generated_output = self.tokenizer.decode(current_ids[0], skip_special_tokens=True)
+    return current_ids, generated_output
 
 def save_model(model, optimizer, args, filepath):
   save_info = {
@@ -146,7 +213,12 @@ def train(args):
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr)
+  if args.use_lora:
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = AdamW(params, lr=lr)
+    print(f"LoRA enabled: training {sum(p.numel() for p in params):,} parameters")
+  else:
+    optimizer = AdamW(model.parameters(), lr=lr)
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
@@ -236,6 +308,11 @@ def get_args():
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
+
+  # LoRA (Low-Rank Adaptation) - fewer trainable params, often better for small datasets
+  parser.add_argument("--use_lora", action='store_true', help="Use LoRA instead of full fine-tuning")
+  parser.add_argument("--lora_rank", type=int, default=8, help="LoRA rank (typical: 4, 8, 16)")
+  parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA scaling (2*rank)")
 
   args = parser.parse_args()
   return args
