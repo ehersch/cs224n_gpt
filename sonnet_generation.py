@@ -5,6 +5,9 @@ Running:
   `python sonnet_generation.py --use_gpu`
 
 trains your SonnetGPT model and writes the required submission files.
+
+With LoRA (fewer params, often better for small datasets):
+  `python sonnet_generation.py --use_gpu --use_lora`
 '''
 
 import argparse
@@ -24,6 +27,7 @@ from datasets import (
   SonnetsDataset,
 )
 from models.gpt2 import GPT2Model
+from modules.lora import LoRALinear
 
 from optimizer import AdamW
 
@@ -41,18 +45,38 @@ def seed_everything(seed=11711):
   torch.backends.cudnn.deterministic = True
 
 
+def _apply_lora_to_gpt(gpt, rank, alpha):
+  """Freeze base GPT and wrap target linear layers with LoRA."""
+  for param in gpt.parameters():
+    param.requires_grad = False
+
+  for layer in gpt.gpt_layers:
+    # Attention: Q, K, V
+    layer.self_attention.query = LoRALinear(layer.self_attention.query, rank=rank, alpha=alpha)
+    layer.self_attention.key = LoRALinear(layer.self_attention.key, rank=rank, alpha=alpha)
+    layer.self_attention.value = LoRALinear(layer.self_attention.value, rank=rank, alpha=alpha)
+    # Attention output
+    layer.attention_dense = LoRALinear(layer.attention_dense, rank=rank, alpha=alpha)
+    # MLP
+    layer.interm_dense = LoRALinear(layer.interm_dense, rank=rank, alpha=alpha)
+    layer.out_dense = LoRALinear(layer.out_dense, rank=rank, alpha=alpha)
+
+
 class SonnetGPT(nn.Module):
-  """Your GPT-2 Model designed for paraphrase detection."""
+  """Your GPT-2 Model designed for sonnet generation."""
 
   def __init__(self, args):
     super().__init__()
     self.gpt = GPT2Model.from_pretrained(model=args.model_size, d=args.d, l=args.l, num_heads=args.num_heads)
     self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     self.tokenizer.pad_token = self.tokenizer.eos_token
+    self.use_lora = getattr(args, 'use_lora', False)
 
-    # By default, fine-tune the full model. TODO: this is maybe not idea.
-    for param in self.gpt.parameters():
-      param.requires_grad = True
+    if self.use_lora:
+      _apply_lora_to_gpt(self.gpt, rank=args.lora_rank, alpha=args.lora_alpha)
+    else:
+      for param in self.gpt.parameters():
+        param.requires_grad = True
 
   def forward(self, input_ids, attention_mask):
     """
@@ -189,7 +213,12 @@ def train(args):
   model = model.to(device)
 
   lr = args.lr
-  optimizer = AdamW(model.parameters(), lr=lr)
+  if args.use_lora:
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = AdamW(params, lr=lr)
+    print(f"LoRA enabled: training {sum(p.numel() for p in params):,} parameters")
+  else:
+    optimizer = AdamW(model.parameters(), lr=lr)
 
   # Run for the specified number of epochs.
   for epoch in range(args.epochs):
@@ -279,6 +308,11 @@ def get_args():
   parser.add_argument("--lr", type=float, help="learning rate", default=1e-5)
   parser.add_argument("--model_size", type=str, help="The model size as specified on hugging face.",
                       choices=['gpt2', 'gpt2-medium', 'gpt2-large', 'gpt2-xl'], default='gpt2')
+
+  # LoRA (Low-Rank Adaptation) - fewer trainable params, often better for small datasets
+  parser.add_argument("--use_lora", action='store_true', help="Use LoRA instead of full fine-tuning")
+  parser.add_argument("--lora_rank", type=int, default=8, help="LoRA rank (typical: 4, 8, 16)")
+  parser.add_argument("--lora_alpha", type=float, default=16.0, help="LoRA scaling (2*rank)")
 
   args = parser.parse_args()
   return args
