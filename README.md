@@ -56,3 +56,7 @@ library ([Apache License 2.0](./LICENSE)).
 `source .venv/bin/activate`
 
 Created `cs224n_gpt` venv with all dependencies
+
+## To submit `para-dev-output.csv`
+
+You **must** change the labels from `0` and `1` to the proper labels. See Ed post: https://edstem.org/us/courses/90535/discussion/7715611
