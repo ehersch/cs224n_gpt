@@ -27,7 +27,7 @@ def access_llm(prompt, project, location, model_spec):
 
 def save_response(response, path):
     with open(path, "a") as f:  # append to end
-        f.write(response)
+        f.write(response + "\n" + "\n")
 
 
 def prompt(starting_index: int) -> str:
@@ -45,7 +45,7 @@ def prompt(starting_index: int) -> str:
     - After the delimiter, output the 14 lines of the sonnet.
     - Output nothing else.
 
-    Also return a newline after every sonnet (including 2 after the final sonnet at the end of the response). Begin.
+    Begin.
     """.strip()
 
 
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
 
-    for start_idx in tqdm(range(41, 1000, 20), desc="Generating sonnets"):
+    for start_idx in tqdm(range(661, 1000, 20), desc="Generating sonnets"):
         p = prompt(start_idx)
         repsonse = access_llm(p, project, location, model_spec)
 
