@@ -8,6 +8,7 @@ from os import access
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
+from tqdm import tqdm
 
 
 def access_llm(prompt, project, location, model_spec):
@@ -31,7 +32,7 @@ def save_response(response, path):
 
 def prompt(starting_index: int) -> str:
     return f"""
-    Generate 20 Shakespearean sonnets in English, in the style of Shakespeare’s original sonnets.
+    Generate 20 Shakespearean sonnets in English, in the style of Shakespeare's original sonnets.
 
     Hard constraints for EACH sonnet:
     - Exactly 14 non-empty lines.
@@ -44,7 +45,7 @@ def prompt(starting_index: int) -> str:
     - After the delimiter, output the 14 lines of the sonnet.
     - Output nothing else.
 
-    Begin.
+    Also return a newline after every sonnet (including 2 after the final sonnet at the end of the response). Begin.
     """.strip()
 
 
@@ -53,8 +54,9 @@ if __name__ == "__main__":
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
 
-    prompt = prompt(1)
-    repsonse = access_llm(prompt, project, location, model_spec)
+    for start_idx in tqdm(range(41, 1000, 20), desc="Generating sonnets"):
+        p = prompt(start_idx)
+        repsonse = access_llm(p, project, location, model_spec)
 
-    path = "synthetic_data/synthetic_sonnets.txt"
-    save_response(repsonse, path)
+        path = "synthetic_data/synthetic_sonnets.txt"
+        save_response(repsonse, path)
