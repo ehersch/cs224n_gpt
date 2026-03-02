@@ -11,6 +11,7 @@ from os import access
 import vertexai
 from vertexai.generative_models import GenerativeModel
 from tqdm import tqdm
+import json
 
 
 def access_llm(prompt, project, location, model_spec):
@@ -55,7 +56,7 @@ def prompt(batch_id: int, n_pairs: int = 50) -> str:
     return prompt
 
 
-if __name__ == "__main__":
+def generate_data():
     model_spec = "gemini-2.5-flash-lite"
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
@@ -65,3 +66,31 @@ if __name__ == "__main__":
         repsonse = access_llm(p, project, location, model_spec)
         path = "synthetic_data/anti_hallucination_qa.txt"
         save_response(repsonse, path)
+
+
+def process_data(path_in, path_out):
+    data = []
+
+    with open(path_in, "r") as f:
+        for line in f:
+            first = line.split("###Question###")[1]
+            lst = first.split(", ###Answer###")
+            if len(lst) != 2:
+                print(lst)
+
+            else:
+                question = lst[0]
+                answer = lst[1]
+                data += [[question, answer]]
+
+    with open(path_out, "w") as json_file:
+        # 3. Use json.dump() to write the data to the file
+        json.dump(data, json_file, indent=4)
+
+
+if __name__ == "__main__":
+    # generate_data()
+    process_data(
+        "synthetic_data/anti_hallucination_qa.txt",
+        "synthetic_data/anti_hallucination_qa.json",
+    )

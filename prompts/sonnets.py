@@ -49,7 +49,7 @@ def prompt(starting_index: int) -> str:
     """.strip()
 
 
-if __name__ == "__main__":
+def generate_data():
     model_spec = "gemini-2.5-flash-lite"
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
@@ -60,3 +60,12 @@ if __name__ == "__main__":
 
         path = "synthetic_data/synthetic_sonnets.txt"
         save_response(repsonse, path)
+
+
+def process_data():
+    pass
+
+
+if __name__ == "__main__":
+    generate_data()
+    process_data()
