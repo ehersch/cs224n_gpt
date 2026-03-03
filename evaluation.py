@@ -78,3 +78,21 @@ def test_sonnet(
     # compute chrf
     chrf_score = chrf.corpus_score(generated_sonnets, [true_sonnets])
     return float(chrf_score.score)
+
+if __name__ == "__main__":
+    gold_path = "data/TRUE_sonnets_held_out_dev.txt"  
+    alpha_scores = [8, 16, 32]
+    lora_scores = [4, 8, 16, 32, 64]
+    model_sizes = ["small"]#, "medium", "large", "xl"]
+    for alpha in alpha_scores:
+        test_path = f"predictions/generated_sonnets_alpha{alpha}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
+    for lora in lora_scores:
+        test_path = f"predictions/generated_sonnets_lora{lora}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
+    for model_size in model_sizes:
+        test_path = f"predictions/generated_sonnets_{model_size}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
