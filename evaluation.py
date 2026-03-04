@@ -81,18 +81,21 @@ def test_sonnet(
 
 if __name__ == "__main__":
     gold_path = "data/TRUE_sonnets_held_out_dev.txt"  
-    alpha_scores = [8, 16, 32]
-    lora_scores = [4, 8, 16, 32, 64]
-    model_sizes = ["small"]#, "medium", "large", "xl"]
-    for alpha in alpha_scores:
-        test_path = f"predictions/generated_sonnets_alpha{alpha}.txt"
-        chrf_score = test_sonnet(test_path, gold_path)
-        print(f"CHRF score for {test_path}: {chrf_score}")
+    # alpha_scores = [8, 16, 32]
+    lora_scores = [8, 16, 32, 64, 128]
+    lr_scores = ['1e_4', '2e_4', '3e_4']
+    # for alpha in alpha_scores:
+    #     test_path = f"predictions/generated_sonnets_dev_alpha{alpha}.txt"
+    #     chrf_score = test_sonnet(test_path, gold_path)
+    #     print(f"CHRF score for {test_path}: {chrf_score}")
     for lora in lora_scores:
-        test_path = f"predictions/generated_sonnets_lora{lora}.txt"
+        test_path = f"predictions/generated_sonnets_dev_lora{lora}.txt"
         chrf_score = test_sonnet(test_path, gold_path)
         print(f"CHRF score for {test_path}: {chrf_score}")
-    for model_size in model_sizes:
-        test_path = f"predictions/generated_sonnets_{model_size}.txt"
-        chrf_score = test_sonnet(test_path, gold_path)
-        print(f"CHRF score for {test_path}: {chrf_score}")
+    # for lr in lr_scores:
+    #     test_path = f"predictions/generated_sonnets_dev_lora4_{lr}.txt"
+    #     chrf_score = test_sonnet(test_path, gold_path)
+    #     print(f"CHRF score for {test_path}: {chrf_score}")
+    test_path = f"predictions/generated_sonnets_dev.txt"
+    chrf_score = test_sonnet(test_path, gold_path)
+    print(f"CHRF score for {test_path}: {chrf_score}")

@@ -20,13 +20,13 @@ import argparse
 import os
 import random
 import sys
+import tempfile
 import torch
 
 import numpy as np
 import torch.nn.functional as F
 
 from torch import nn
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import GPT2Tokenizer
@@ -39,6 +39,7 @@ from models.gpt2 import GPT2Model
 from modules.lora import LoRALinear
 
 from optimizer import AdamW
+from evaluation import test_sonnet
 
 TQDM_DISABLE = False
 
@@ -217,7 +218,6 @@ def train(args):
     collate_fn=sonnet_dataset.collate_fn,
     num_workers=args.num_workers,
   )
-  held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
 
   args = add_arguments(args)
   model = SonnetGPT(args)
@@ -231,10 +231,9 @@ def train(args):
   else:
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=args.weight_decay)
 
-  scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
   pad_id = model.tokenizer.pad_token_id
-  best_loss = float('inf')
-  best_epoch = -1
+  best_dev_chrf = -1.0
+  best_epoch_dev = -1
 
   for epoch in range(args.epochs):
     model.train()
@@ -264,24 +263,27 @@ def train(args):
       num_batches += 1
 
     train_loss = train_loss / num_batches
-    scheduler.step()
-    print(f"Epoch {epoch}: train loss :: {train_loss:.3f} (lr={scheduler.get_last_lr()[0]:.2e}).")
-    print('Generating several output sonnets...')
-    model.eval()
-    for batch in held_out_sonnet_dataset:
-      encoding = model.tokenizer(batch[1], return_tensors='pt', padding=True, truncation=True).to(device)
-      output = model.generate(encoding['input_ids'], temperature=args.temperature, top_p=args.top_p)
-      print(f'{batch[1]}{output[1]}\n\n')
+    print(f"Epoch {epoch}: train loss :: {train_loss:.3f}.")
 
     save_model(model, optimizer, args, f'{epoch}_{args.filepath}')
-    if train_loss < best_loss:
-      best_loss = train_loss
-      best_epoch = epoch
-      save_model(model, optimizer, args, f'{args.epochs-1}_{args.filepath}')
-      print(f"  New best loss {best_loss:.3f}, saved as final checkpoint.")
 
-    if epoch - best_epoch >= args.early_stopping_patience:
-      print(f"Early stopping at epoch {epoch} (no improvement for {args.early_stopping_patience} epochs).")
+    if epoch % 5 == 0 and epoch != 0:
+      model.eval()
+      dev_chrf = compute_dev_chrf(
+        model, device,
+        args.dev_held_out_path, args.dev_gold_path,
+        args.temperature, args.top_p,
+      )
+      print(f"  Dev CHRF (epoch {epoch}): {dev_chrf:.2f}")
+      if dev_chrf > best_dev_chrf:
+        best_dev_chrf = dev_chrf
+        best_epoch_dev = epoch
+        save_model(model, optimizer, args, f'{args.epochs-1}_{args.filepath}')
+        print(f"  New best dev CHRF {best_dev_chrf:.2f}, saved as final checkpoint.")
+      model.train()
+
+    if best_epoch_dev >= 0 and epoch - best_epoch_dev >= args.early_stopping_patience:
+      print(f"Early stopping at epoch {epoch} (no dev CHRF improvement for {args.early_stopping_patience} epochs).")
       break
 
 
@@ -311,7 +313,7 @@ def generate_submission_sonnets(args):
     full_sonnet = f'{decoded_output}\n\n'
     generated_sonnets.append((sonnet_id, full_sonnet))
 
-    print(f'{decoded_output}\n\n')
+    # print(f'{decoded_output}\n\n')
 
   with open(args.sonnet_out, "w+") as f:
     f.write(f"--Generated Sonnets-- \n\n")
@@ -320,12 +322,44 @@ def generate_submission_sonnets(args):
       f.write(sonnet[1])
 
 
+@torch.no_grad()
+def compute_dev_chrf(model, device, dev_prompt_path, dev_gold_path, temperature, top_p):
+  """Run generation on dev prompts, write to temp file, return CHRF vs dev gold."""
+  dataset = SonnetsDataset(dev_prompt_path)
+  generated_sonnets = []
+  for batch in dataset:
+    sonnet_id = batch[0]
+    encoding = model.tokenizer(
+      batch[1], return_tensors="pt", padding=False, truncation=True
+    ).to(device)
+    output = model.generate(
+      encoding["input_ids"], temperature=temperature, top_p=top_p
+    )[0][0]
+    decoded = model.tokenizer.decode(output, skip_special_tokens=True)
+    generated_sonnets.append((sonnet_id, f"{decoded}\n\n"))
+  lines = ["--Generated Sonnets-- \n\n"]
+  for sonnet in generated_sonnets:
+    lines.append(f"\n{sonnet[0]}\n")
+    lines.append(sonnet[1])
+  with tempfile.NamedTemporaryFile(
+    mode="w", suffix=".txt", delete=False
+  ) as f:
+    f.write("".join(lines))
+    tmp_path = f.name
+  try:
+    return test_sonnet(tmp_path, dev_gold_path)
+  finally:
+    os.unlink(tmp_path)
+
+
 def get_args():
   parser = argparse.ArgumentParser()
 
   parser.add_argument("--sonnet_path", type=str, default="data/sonnets.txt")
-  parser.add_argument("--held_out_sonnet_path", type=str, default="data/sonnets_held_out.txt")
-  parser.add_argument("--sonnet_out", type=str, default="predictions/generated_sonnets.txt")
+  parser.add_argument("--held_out_sonnet_path", type=str, default="data/sonnets_held_out_dev.txt")
+  parser.add_argument("--sonnet_out", type=str, default="predictions/generated_sonnets_dev.txt")
+  parser.add_argument("--dev_held_out_path", type=str, default="data/sonnets_held_out_dev.txt")
+  parser.add_argument("--dev_gold_path", type=str, default="data/TRUE_sonnets_held_out_dev.txt")
 
   parser.add_argument("--seed", type=int, default=11711)
   parser.add_argument("--epochs", type=int, default=10)
@@ -344,7 +378,7 @@ def get_args():
   # Training improvements
   parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay")
   parser.add_argument("--grad_clip_max_norm", type=float, default=1.0, help="Max norm for gradient clipping")
-  parser.add_argument("--early_stopping_patience", type=int, default=3, help="Stop after N epochs without improvement")
+  parser.add_argument("--early_stopping_patience", type=int, default=3, help="Stop after N epochs without dev CHRF improvement")
   parser.add_argument("--num_workers", type=int, default=2, help="DataLoader num_workers (0 to disable)")
 
   # LoRA (Low-Rank Adaptation) - fewer trainable params, often better for small datasets
@@ -390,7 +424,8 @@ if modal is not None:
   sonnet_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install(
-      "torch", "transformers", "einops", "tqdm", "requests", "filelock", "importlib-metadata"
+      "torch", "transformers", "einops", "tqdm", "requests", "filelock", "importlib-metadata",
+      "sacrebleu", "scikit-learn",
     )
     .workdir(MODAL_WORKSPACE)
     .add_local_dir(".", remote_path=MODAL_WORKSPACE, ignore=[".git", ".git/*"])
@@ -399,7 +434,7 @@ if modal is not None:
   volume = modal.Volume.from_name("sonnet-checkpoints", create_if_missing=True)
   volumes = {MODAL_CHECKPOINTS: volume}
 
-  app = modal.App("sonnet-lora-rank-sweep")
+  app = modal.App("sonnet-lora-alpha-sweep")
 
   @app.function(
     image=sonnet_image,
@@ -409,9 +444,9 @@ if modal is not None:
   )
   def train_sft(
     sonnet_path: str = "data/sonnets.txt",
-    held_out_sonnet_path: str = "data/sonnets_held_out.txt",
+    held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
     epochs: int = 10,
-    batch_size: int = 8,
+    batch_size: int = 16,
     lr: float = 1e-5,
     model_size: str = "gpt2",
     use_lora: bool = False,
@@ -422,17 +457,19 @@ if modal is not None:
     top_p: float = 0.9,
     weight_decay: float = 0.01,
     grad_clip_max_norm: float = 1.0,
-    early_stopping_patience: int = 3,
+    early_stopping_patience: int = 5,
     num_workers: int = 2,
+    dev_held_out_path: str = "data/sonnets_held_out_dev.txt",
+    dev_gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
   ):
-    """Run SFT training on Modal with padding mask, grad clip, LR schedule, early stopping."""
+    """Run SFT training on Modal. Dev CHRF every 5 epochs; early stop on dev CHRF."""
     sys.path.insert(0, MODAL_WORKSPACE)
     seed_everything(seed)
 
     args = argparse.Namespace(
       sonnet_path=os.path.join(MODAL_WORKSPACE, sonnet_path),
       held_out_sonnet_path=os.path.join(MODAL_WORKSPACE, held_out_sonnet_path),
-      sonnet_out="predictions/generated_sonnets.txt",
+      sonnet_out="predictions/generated_sonnets_dev.txt",
       epochs=epochs,
       batch_size=batch_size,
       lr=lr,
@@ -446,6 +483,8 @@ if modal is not None:
       grad_clip_max_norm=grad_clip_max_norm,
       early_stopping_patience=early_stopping_patience,
       num_workers=num_workers,
+      dev_held_out_path=os.path.join(MODAL_WORKSPACE, dev_held_out_path),
+      dev_gold_path=os.path.join(MODAL_WORKSPACE, dev_gold_path),
     )
     args.filepath = (
       f"{epochs}-{lr}-sonnet-lora{lora_rank}-alpha{lora_alpha}.pt"
@@ -463,7 +502,6 @@ if modal is not None:
       collate_fn=sonnet_dataset.collate_fn,
       num_workers=num_workers,
     )
-    held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
 
     args = add_arguments(args)
     model = SonnetGPT(args)
@@ -476,10 +514,9 @@ if modal is not None:
     else:
       optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     pad_id = model.tokenizer.pad_token_id
-    best_loss = float("inf")
-    best_epoch = -1
+    best_dev_chrf = -1.0
+    best_epoch_dev = -1
 
     for epoch in range(args.epochs):
       model.train()
@@ -505,41 +542,38 @@ if modal is not None:
         num_batches += 1
 
       train_loss /= num_batches
-      scheduler.step()
-      print(f"Epoch {epoch}: train loss :: {train_loss:.3f} (lr={scheduler.get_last_lr()[0]:.2e})")
-      model.eval()
-      for batch in held_out_sonnet_dataset:
-        encoding = model.tokenizer(
-          batch[1], return_tensors="pt", padding=True, truncation=True
-        ).to(device)
-        output = model.generate(
-          encoding["input_ids"],
-          temperature=args.temperature,
-          top_p=args.top_p,
-        )
-        print(f"{batch[1]}{output[1]}\n\n")
+      print(f"Epoch {epoch}: train loss :: {train_loss:.3f}")
 
-      checkpoint_name = f"{epoch}_{args.filepath}"
-      checkpoint_path = os.path.join(MODAL_CHECKPOINTS, checkpoint_name)
-      save_model(model, optimizer, args, checkpoint_path)
-      if train_loss < best_loss:
-        best_loss = train_loss
-        best_epoch = epoch
-        final_name = f"{args.epochs - 1}_{args.filepath}"
-        final_path = os.path.join(MODAL_CHECKPOINTS, final_name)
-        save_model(model, optimizer, args, final_path)
-        print(f"  New best loss {best_loss:.3f}, saved as final checkpoint.")
-      if epoch - best_epoch >= args.early_stopping_patience:
-        print(f"Early stopping at epoch {epoch} (no improvement for {args.early_stopping_patience} epochs).")
+      if epoch % 5 == 0 and epoch != 0:
+        model.eval()
+        dev_chrf = compute_dev_chrf(
+          model, device,
+          args.dev_held_out_path, args.dev_gold_path,
+          args.temperature, args.top_p,
+        )
+        print(f"  Dev CHRF (epoch {epoch}): {dev_chrf:.2f}")
+        if dev_chrf > best_dev_chrf:
+          best_dev_chrf = dev_chrf
+          best_epoch_dev = epoch
+          best_name = f"best_{args.filepath}"
+          best_path = os.path.join(MODAL_CHECKPOINTS, best_name)
+          save_model(model, optimizer, args, best_path)
+          print(f"  New best dev CHRF {best_dev_chrf:.2f}, saved as only checkpoint.")
+        model.train()
+
+      if best_epoch_dev >= 0 and epoch - best_epoch_dev >= args.early_stopping_patience:
+        print(f"Early stopping at epoch {epoch} (no dev CHRF improvement for {args.early_stopping_patience} epochs).")
         break
+    # If we never ran dev (e.g. < 5 epochs), save current model as the checkpoint
+    if best_epoch_dev < 0:
+      best_name = f"best_{args.filepath}"
+      best_path = os.path.join(MODAL_CHECKPOINTS, best_name)
+      save_model(model, optimizer, args, best_path)
+      print(f"Saved checkpoint (no dev CHRF run): {best_name}")
     volume.commit()
 
-    # Read checkpoint in same container and return bytes (avoids separate download step)
-    final_name = f"{args.epochs - 1}_{args.filepath}"
-    final_path = os.path.join(MODAL_CHECKPOINTS, final_name)
-    with open(final_path, "rb") as f:
-      checkpoint_data = f.read()
-    return {"final_checkpoint": final_name, "checkpoint_data": checkpoint_data}
+    final_name = f"best_{args.filepath}"
+    return {"final_checkpoint": final_name}
 
   @app.function(image=sonnet_image, volumes=volumes)
   def download_checkpoint(filename: str) -> bytes:
@@ -549,22 +583,60 @@ if modal is not None:
     with open(path, "rb") as f:
       return f.read()
 
+  @app.function(image=sonnet_image, gpu="T4", volumes=volumes, timeout=600)
+  def run_generation_and_get_submission(
+    checkpoint_filename: str,
+    held_out_path: str,
+    temperature: float = 1.2,
+    top_p: float = 0.9,
+  ) -> str:
+    """Load checkpoint from Volume, run generation, return submission file content."""
+    sys.path.insert(0, MODAL_WORKSPACE)
+    volume.reload()
+    checkpoint_path = os.path.join(MODAL_CHECKPOINTS, checkpoint_filename)
+    saved = torch.load(checkpoint_path, weights_only=False, map_location="cuda")
+    args = add_arguments(saved["args"])
+    model = SonnetGPT(args)
+    model.load_state_dict(saved["model"])
+    model = model.to("cuda")
+    model.eval()
+
+    held_out_full = os.path.join(MODAL_WORKSPACE, held_out_path)
+    dataset = SonnetsDataset(held_out_full)
+    generated_sonnets = []
+    for batch in dataset:
+      sonnet_id = batch[0]
+      encoding = model.tokenizer(
+        batch[1], return_tensors="pt", padding=False, truncation=True
+      ).to("cuda")
+      output = model.generate(
+        encoding["input_ids"], temperature=temperature, top_p=top_p
+      )[0][0]
+      decoded = model.tokenizer.decode(output, skip_special_tokens=True)
+      generated_sonnets.append((sonnet_id, f"{decoded}\n\n"))
+
+    lines = ["--Generated Sonnets-- \n\n"]
+    for sonnet in generated_sonnets:
+      lines.append(f"\n{sonnet[0]}\n")
+      lines.append(sonnet[1])
+    return "".join(lines)
+
   @app.local_entrypoint()
   def main(
     sonnet_path: str = "data/sonnets.txt",
-    held_out_sonnet_path: str = "data/sonnets_held_out.txt",
-    sonnet_out: str = "predictions/generated_sonnets.txt",
-    epochs: int = 20,
-    batch_size: int = 8,
-    lr: float = 5e-6,
+    held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
+    sonnet_out: str = "predictions/generated_sonnets_dev.txt",
+    epochs: int = 25,
+    batch_size: int = 32,
+    lr: float = 5e-5,
     model_size: str = "gpt2",
     use_lora: bool = False,
     lora_rank: int = 8,
     lora_alpha: float = 16.0,
-    temperature: float = 1.2,
+    temperature: float = 1.1,
     top_p: float = 0.9,
   ):
-    """Run SFT training on Modal, download checkpoint, run generation locally."""
+    """Run SFT training on Modal. Checkpoints are saved to the Volume (no local download)."""
     print("Running SFT training on Modal...")
     result = train_sft.remote(
       sonnet_path=sonnet_path,
@@ -580,44 +652,35 @@ if modal is not None:
       top_p=top_p,
     )
     final_checkpoint = result["final_checkpoint"]
-    print(f"Training complete. Saving checkpoint {final_checkpoint}...")
-    with open(final_checkpoint, "wb") as f:
-      f.write(result["checkpoint_data"])
-    print(f"Checkpoint saved to {final_checkpoint}")
-
-    # Run generation locally
-    args = argparse.Namespace(
-      sonnet_path=sonnet_path,
-      held_out_sonnet_path=held_out_sonnet_path,
-      sonnet_out=sonnet_out,
-      epochs=epochs,
-      batch_size=batch_size,
-      lr=lr,
-      model_size=model_size,
-      use_lora=use_lora,
-      use_gpu=torch.cuda.is_available(),
+    print(f"Training complete. Final checkpoint: {final_checkpoint} (in Volume 'sonnet-checkpoints').")
+    print("Running generation and downloading submission file...")
+    submission_txt = run_generation_and_get_submission.remote(
+      checkpoint_filename=final_checkpoint,
+      held_out_path=held_out_sonnet_path,
       temperature=temperature,
       top_p=top_p,
     )
-    args.filepath = f"{epochs}-{lr}-sonnet.pt"
-    generate_submission_sonnets(args)
+    os.makedirs(os.path.dirname(sonnet_out) or ".", exist_ok=True)
+    with open(sonnet_out, "w") as f:
+      f.write(submission_txt)
+    print(f"Submission file saved to {sonnet_out}")
 
-  LORA_RANKS = [4, 8, 16, 32, 64]
+  LORA_RANKS = [4, 8, 16, 32, 64, 128]
   # LORA_RANKS = [64]
 
   @app.local_entrypoint()
   def main_lora_sweep(
     sonnet_path: str = "data/sonnets.txt",
-    held_out_sonnet_path: str = "data/sonnets_held_out.txt",
-    sonnet_out: str = "predictions/generated_sonnets.txt",
+    held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
+    sonnet_out: str = "predictions/generated_sonnets_dev.txt",
     epochs: int = 20,
-    batch_size: int = 8,
-    lr: float = 5e-6,
+    batch_size: int = 32,
+    lr: float = 3e-4,
     model_size: str = "gpt2",
     lora_alpha: float = 16.0,
     temperature: float = 1.2,
     top_p: float = 0.9,
-    lora_ranks: str = "4,8,16,32,64",
+    lora_ranks: str = "8,16,32,64,128",
   ):
     """Run SFT with LoRA sequentially for multiple ranks (default: 4,8,16,32,64)."""
     ranks = [int(r.strip()) for r in lora_ranks.split(",")]
@@ -637,42 +700,33 @@ if modal is not None:
         lora_alpha=lora_alpha,
         temperature=temperature,
         top_p=top_p,
+        weight_decay=0,
       )
       final_checkpoint = result["final_checkpoint"]
-      print(f"Saving checkpoint {final_checkpoint}...")
-      with open(final_checkpoint, "wb") as f:
-        f.write(result["checkpoint_data"])
-      print(f"Checkpoint saved to {final_checkpoint}")
-
+      print(f"LoRA rank {rank} done. Running generation and downloading submission file...")
       base, ext = os.path.splitext(sonnet_out)
       run_sonnet_out = f"{base}_lora{rank}{ext}"
-      args = argparse.Namespace(
-        sonnet_path=sonnet_path,
-        held_out_sonnet_path=held_out_sonnet_path,
-        sonnet_out=run_sonnet_out,
-        epochs=epochs,
-        batch_size=batch_size,
-        lr=lr,
-        model_size=model_size,
-        use_lora=True,
-        use_gpu=torch.cuda.is_available(),
+      submission_txt = run_generation_and_get_submission.remote(
+        checkpoint_filename=final_checkpoint,
+        held_out_path=held_out_sonnet_path,
         temperature=temperature,
         top_p=top_p,
       )
-      args.filepath = f"{epochs}-{lr}-sonnet-lora{rank}-alpha{lora_alpha}.pt"
-      generate_submission_sonnets(args)
-      print(f"Submission file written to {run_sonnet_out}")
+      os.makedirs(os.path.dirname(run_sonnet_out) or ".", exist_ok=True)
+      with open(run_sonnet_out, "w") as f:
+        f.write(submission_txt)
+      print(f"Submission file saved to {run_sonnet_out}")
 
     print(f"\nDone. Ran {len(ranks)} experiments for LoRA ranks: {ranks}")
 
   @app.local_entrypoint()
   def main_lora_alpha_sweep(
     sonnet_path: str = "data/sonnets.txt",
-    held_out_sonnet_path: str = "data/sonnets_held_out.txt",
-    sonnet_out: str = "predictions/generated_sonnets.txt",
+    held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
+    sonnet_out: str = "predictions/generated_sonnets_dev.txt",
     epochs: int = 20,
-    batch_size: int = 8,
-    lr: float = 5e-6,
+    batch_size: int = 32,
+    lr: float = 1e-4,
     model_size: str = "gpt2",
     lora_rank: int = 8,
     temperature: float = 1.2,
@@ -699,29 +753,19 @@ if modal is not None:
         top_p=top_p,
       )
       final_checkpoint = result["final_checkpoint"]
-      print(f"Saving checkpoint {final_checkpoint}...")
-      with open(final_checkpoint, "wb") as f:
-        f.write(result["checkpoint_data"])
-      print(f"Checkpoint saved to {final_checkpoint}")
-
+      print(f"LoRA alpha {alpha} done. Running generation and downloading submission file...")
       base, ext = os.path.splitext(sonnet_out)
       run_sonnet_out = f"{base}_alpha{alpha}{ext}"
-      args = argparse.Namespace(
-        sonnet_path=sonnet_path,
-        held_out_sonnet_path=held_out_sonnet_path,
-        sonnet_out=run_sonnet_out,
-        epochs=epochs,
-        batch_size=batch_size,
-        lr=lr,
-        model_size=model_size,
-        use_lora=True,
-        use_gpu=torch.cuda.is_available(),
+      submission_txt = run_generation_and_get_submission.remote(
+        checkpoint_filename=final_checkpoint,
+        held_out_path=held_out_sonnet_path,
         temperature=temperature,
         top_p=top_p,
       )
-      args.filepath = f"{epochs}-{lr}-sonnet-lora{lora_rank}-alpha{alpha}.pt"
-      generate_submission_sonnets(args)
-      print(f"Submission file written to {run_sonnet_out}")
+      os.makedirs(os.path.dirname(run_sonnet_out) or ".", exist_ok=True)
+      with open(run_sonnet_out, "w") as f:
+        f.write(submission_txt)
+      print(f"Submission file saved to {run_sonnet_out}")
 
     print(f"\nDone. Ran {len(alphas)} experiments for LoRA alphas: {alphas} (rank={lora_rank})")
 
