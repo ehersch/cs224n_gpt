@@ -68,8 +68,8 @@ def _apply_lora_to_gpt(gpt, rank, alpha):
     # Attention output
     layer.attention_dense = LoRALinear(layer.attention_dense, rank=rank, alpha=alpha)
     # MLP
-    layer.interm_dense = LoRALinear(layer.interm_dense, rank=rank, alpha=alpha)
-    layer.out_dense = LoRALinear(layer.out_dense, rank=rank, alpha=alpha)
+    # layer.interm_dense = LoRALinear(layer.interm_dense, rank=rank, alpha=alpha)
+    # layer.out_dense = LoRALinear(layer.out_dense, rank=rank, alpha=alpha)
 
 
 class SonnetGPT(nn.Module):
@@ -675,12 +675,12 @@ if modal is not None:
     sonnet_out: str = "predictions/generated_sonnets_dev.txt",
     epochs: int = 20,
     batch_size: int = 32,
-    lr: float = 3e-4,
+    lr: float = 1e-3,
     model_size: str = "gpt2",
     lora_alpha: float = 16.0,
     temperature: float = 1.2,
     top_p: float = 0.9,
-    lora_ranks: str = "8,16,32,64,128",
+    lora_ranks: str = "4",
   ):
     """Run SFT with LoRA sequentially for multiple ranks (default: 4,8,16,32,64)."""
     ranks = [int(r.strip()) for r in lora_ranks.split(",")]
