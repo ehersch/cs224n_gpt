@@ -78,3 +78,25 @@ def test_sonnet(
     # compute chrf
     chrf_score = chrf.corpus_score(generated_sonnets, [true_sonnets])
     return float(chrf_score.score)
+
+if __name__ == "__main__":
+    gold_path = "data/TRUE_sonnets_held_out_dev.txt"  
+    alpha_scores = [8, 16, 32]
+    lora_scores = [8, 16, 32, 64, 128]
+    lr_scores = ['1e_4', '2e_4', '3e_4', '5e_4', '1e_3', '3e_3', '5e_3']
+    for alpha in alpha_scores:
+        test_path = f"predictions_lora/generated_sonnets_dev_alpha{alpha}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
+    for lora in lora_scores:
+        test_path = f"predictions_lora/generated_sonnets_dev_lora{lora}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
+    for lr in lr_scores:
+        test_path = f"predictions_lora/generated_sonnets_dev_lora4_{lr}.txt"
+        chrf_score = test_sonnet(test_path, gold_path)
+        print(f"CHRF score for {test_path}: {chrf_score}")
+    test_path = f"predictions/generated_sonnets_dev.txt"
+    # test_path = f"predictions/generated_sonnets_dev_lora4_attn_only_ft.txt"
+    chrf_score = test_sonnet(test_path, gold_path)
+    print(f"CHRF score for {test_path}: {chrf_score}")
