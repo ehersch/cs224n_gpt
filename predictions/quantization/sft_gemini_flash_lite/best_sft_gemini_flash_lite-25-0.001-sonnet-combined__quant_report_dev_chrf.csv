@@ -1,0 +1,9 @@
+checkpoint: /checkpoints/sft_gemini_flash_lite/best_sft_gemini_flash_lite-25-0.001-sonnet-combined.pt
+dev_held_out_path: /workspace/data/sonnets_held_out_dev.txt
+dev_gold_path: /workspace/data/TRUE_sonnets_held_out_dev.txt
+seq_len for FLOPs estimate: 128
+
+variant,device,dev_chrf,dev_ce,token_acc,ppl,avg_gen_sec_per_sample,gen_tokens_per_sec,size_mb,approx_flops_per_token
+fp32,cuda,41.780920,5.793983,0.232278,328.317963,1.611318,79.438,477.03,87293952
+bf16,cuda,42.209948,5.796875,0.233283,329.268982,1.463465,87.464,238.56,87293952
+int8_dynamic,cpu,42.085976,5.761603,0.230266,317.857544,11.877722,10.776,232.40,87293952

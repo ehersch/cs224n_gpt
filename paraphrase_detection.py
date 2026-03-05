@@ -12,7 +12,9 @@ trains and evaluates your ParaphraseGPT model and writes the required submission
 '''
 
 import argparse
+import os
 import random
+import sys
 import torch
 
 import numpy as np
@@ -229,6 +231,138 @@ def add_arguments(args):
   else:
     raise Exception(f'{args.model_size} is not supported.')
   return args
+
+
+# ---------------------------------------------------------------------------
+# Modal training/inference for paraphrase detection
+# ---------------------------------------------------------------------------
+try:
+  import modal
+except ImportError:
+  modal = None
+
+if modal is not None:
+  MODAL_WORKSPACE = "/workspace"
+  MODAL_CHECKPOINTS = "/checkpoints"
+
+  para_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install(
+      "torch",
+      "transformers",
+      "einops",
+      "tqdm",
+      "requests",
+      "filelock",
+      "importlib-metadata",
+      "sacrebleu",
+      "scikit-learn",
+      "numpy",
+      "pandas",
+    )
+    .workdir(MODAL_WORKSPACE)
+    .add_local_dir(".", remote_path=MODAL_WORKSPACE, ignore=[".git", ".git/*"])
+  )
+
+  para_volume = modal.Volume.from_name("paraphrase-checkpoints", create_if_missing=True)
+  para_volumes = {MODAL_CHECKPOINTS: para_volume}
+  para_app = modal.App("paraphrase-detection")
+
+  @para_app.function(
+    image=para_image,
+    gpu="L4",
+    timeout=3600 * 2,
+    volumes=para_volumes,
+  )
+  def train_and_test_modal(
+    run_name: str = "paraphrase_modal",
+    para_train: str = "data/quora-train.csv",
+    para_dev: str = "data/quora-dev.csv",
+    para_test: str = "data/quora-test-student.csv",
+    epochs: int = 10,
+    batch_size: int = 8,
+    lr: float = 1e-5,
+    model_size: str = "gpt2",
+    seed: int = 11711,
+  ):
+    sys.path.insert(0, MODAL_WORKSPACE)
+    seed_everything(seed)
+
+    run_dir = os.path.join(MODAL_CHECKPOINTS, run_name)
+    pred_dir = os.path.join(run_dir, "predictions")
+    os.makedirs(pred_dir, exist_ok=True)
+
+    args = argparse.Namespace(
+      para_train=os.path.join(MODAL_WORKSPACE, para_train),
+      para_dev=os.path.join(MODAL_WORKSPACE, para_dev),
+      para_test=os.path.join(MODAL_WORKSPACE, para_test),
+      para_dev_out=os.path.join(pred_dir, "para-dev-output.csv"),
+      para_test_out=os.path.join(pred_dir, "para-test-output.csv"),
+      seed=seed,
+      epochs=epochs,
+      use_gpu=True,
+      batch_size=batch_size,
+      lr=lr,
+      model_size=model_size,
+    )
+    args.filepath = os.path.join(run_dir, f"{epochs}-{lr}-paraphrase.pt")
+
+    train(args)
+    test(args)
+    para_volume.commit()
+
+    return {
+      "checkpoint": os.path.relpath(args.filepath, MODAL_CHECKPOINTS),
+      "dev_out": os.path.relpath(args.para_dev_out, MODAL_CHECKPOINTS),
+      "test_out": os.path.relpath(args.para_test_out, MODAL_CHECKPOINTS),
+    }
+
+  @para_app.function(image=para_image, volumes=para_volumes)
+  def read_volume_file(relative_path: str) -> bytes:
+    para_volume.reload()
+    path = os.path.join(MODAL_CHECKPOINTS, relative_path)
+    with open(path, "rb") as f:
+      return f.read()
+
+  @para_app.local_entrypoint()
+  def main_modal(
+    run_name: str = "paraphrase_modal",
+    para_train: str = "data/quora-train.csv",
+    para_dev: str = "data/quora-dev.csv",
+    para_test: str = "data/quora-test-student.csv",
+    para_dev_out: str = "predictions/para-dev-output.csv",
+    para_test_out: str = "predictions/para-test-output.csv",
+    epochs: int = 10,
+    batch_size: int = 8,
+    lr: float = 1e-5,
+    model_size: str = "gpt2",
+    seed: int = 11711,
+  ):
+    print("Running paraphrase detection train+test on Modal...")
+    result = train_and_test_modal.remote(
+      run_name=run_name,
+      para_train=para_train,
+      para_dev=para_dev,
+      para_test=para_test,
+      epochs=epochs,
+      batch_size=batch_size,
+      lr=lr,
+      model_size=model_size,
+      seed=seed,
+    )
+    print(f"Checkpoint saved in Volume: {result['checkpoint']}")
+
+    dev_bytes = read_volume_file.remote(result["dev_out"])
+    test_bytes = read_volume_file.remote(result["test_out"])
+
+    os.makedirs(os.path.dirname(para_dev_out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(para_test_out) or ".", exist_ok=True)
+    with open(para_dev_out, "wb") as f:
+      f.write(dev_bytes)
+    with open(para_test_out, "wb") as f:
+      f.write(test_bytes)
+    print(f"Saved {para_dev_out}")
+    print(f"Saved {para_test_out}")
 
 
 if __name__ == "__main__":

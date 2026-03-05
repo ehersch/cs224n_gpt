@@ -1,0 +1,12 @@
+checkpoint: /checkpoints/sft_gemini_flash_lite/best_sft_gemini_flash_lite-25-0.001-sonnet-combined.pt
+dev_held_out_path: /workspace/data/sonnets_held_out_dev.txt
+dev_gold_path: /workspace/data/TRUE_sonnets_held_out_dev.txt
+seq_len for FLOPs estimate: 128
+
+variant,device,dev_chrf,dev_ce,token_acc,ppl,avg_gen_sec_per_sample,gen_tokens_per_sec,size_mb,approx_flops_per_token
+fp32,cuda,42.087970,5.793983,0.232278,328.317963,1.234148,103.715,477.03,87293952
+fp16,cuda,41.659914,5.794922,0.232278,328.626495,1.110845,115.228,238.56,87293952
+fp64,cuda,41.818695,5.793983,0.232278,328.317963,11.732486,10.910,953.99,87293952
+bf16,cuda,41.770126,5.796875,0.233283,329.268982,1.124325,113.846,238.56,87293952
+fp8,cuda,41.739039,5.786931,0.235797,326.010986,2.095585,61.081,232.69,87293952
+int8,ERROR,Using a `device_map`, `tp_plan`, `torch.device` context manager or setting `torch.set_default_device(device)` requires `accelerate`. You can install it with `pip install accelerate`
