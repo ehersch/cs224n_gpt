@@ -24,6 +24,7 @@ import random
 import re
 import sys
 import tempfile
+import time
 import torch
 
 import numpy as np
@@ -47,6 +48,55 @@ TQDM_DISABLE = False
 
 # Require dev loss to improve by at least this much to count as improvement (and reset early stopping).
 DEV_LOSS_IMPROVEMENT_TOLERANCE = 0.1
+
+
+def _fake_quantize_ste(x: torch.Tensor, bits: int) -> torch.Tensor:
+    """Symmetric fake-quantization with straight-through estimator (STE)."""
+    if bits <= 0:
+        return x
+    qmax = (2 ** (bits - 1)) - 1
+    qmin = -qmax - 1
+    max_abs = x.detach().abs().max()
+    scale = torch.clamp(max_abs / max(qmax, 1), min=1e-8)
+    x_q = torch.clamp(torch.round(x / scale), qmin, qmax) * scale
+    return x + (x_q - x).detach()
+
+
+class QATLinear(nn.Module):
+    """nn.Linear wrapper that applies fake quantization to weights/bias on each forward."""
+
+    def __init__(self, base: nn.Linear, bits: int):
+        super().__init__()
+        self.base = base
+        self.bits = bits
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = _fake_quantize_ste(self.base.weight, self.bits)
+        b = (
+            _fake_quantize_ste(self.base.bias, self.bits)
+            if self.base.bias is not None
+            else None
+        )
+        return F.linear(x, w, b)
+
+
+def _apply_qat_weight_fake_quant(module: nn.Module, bits: int):
+    """Recursively replace nn.Linear modules with QATLinear wrappers."""
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear):
+            setattr(module, name, QATLinear(child, bits))
+        else:
+            _apply_qat_weight_fake_quant(child, bits)
+
+
+def _estimate_model_size_mb(model: nn.Module, weight_bits: int | None = None) -> float:
+    """Estimate model size in MB; uses custom bitwidth when provided."""
+    total_params = sum(p.numel() for p in model.parameters())
+    if weight_bits is None:
+        total_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    else:
+        total_bytes = total_params * (weight_bits / 8.0)
+    return float(total_bytes / (1024**2))
 
 
 def _load_sonnets_from_file(file_path):
@@ -162,12 +212,19 @@ class SonnetGPT(nn.Module):
         self.tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.use_lora = getattr(args, "use_lora", False)
+        self.qat_weight_bits = int(getattr(args, "qat_weight_bits", 0) or 0)
 
         if self.use_lora:
             _apply_lora_to_gpt(self.gpt, rank=args.lora_rank, alpha=args.lora_alpha)
         else:
             for param in self.gpt.parameters():
                 param.requires_grad = True
+
+        if self.qat_weight_bits > 0:
+            _apply_qat_weight_fake_quant(self, self.qat_weight_bits)
+            print(
+                f"QAT enabled: fake-quantizing linear weights to {self.qat_weight_bits}-bit before/during SFT."
+            )
 
     def forward(self, input_ids, attention_mask):
         """
@@ -314,6 +371,29 @@ def train(args):
     model = SonnetGPT(args)
     model = model.to(device)
 
+    fp32_size_mb = _estimate_model_size_mb(model, weight_bits=None)
+    quant_bits = int(getattr(args, "qat_weight_bits", 0) or 0)
+    quant_size_mb = (
+        _estimate_model_size_mb(model, weight_bits=quant_bits)
+        if quant_bits > 0
+        else fp32_size_mb
+    )
+    print(
+        f"Model size estimate: fp32={fp32_size_mb:.2f} MB, "
+        + (
+            f"quantized({quant_bits}-bit)={quant_size_mb:.2f} MB"
+            if quant_bits > 0
+            else "quantized=disabled"
+        )
+    )
+
+    pretrain_dev_loss = compute_dev_ce_loss(
+        model, device, args.dev_gold_path, batch_size=args.batch_size
+    )
+    print(
+        f"Pre-SFT dev CE loss on {'quantized' if quant_bits > 0 else 'base'} pretrained model: {pretrain_dev_loss:.3f}"
+    )
+
     lr = args.lr
     if args.use_lora:
         params = [p for p in model.parameters() if p.requires_grad]
@@ -325,6 +405,9 @@ def train(args):
     pad_id = model.tokenizer.pad_token_id
     best_dev_loss = float("inf")
     best_epoch_dev = -1
+    total_steps = 0
+    total_examples = 0
+    train_start_time = time.perf_counter()
 
     for epoch in range(args.epochs):
         model.train()
@@ -354,6 +437,8 @@ def train(args):
 
             train_loss += loss.item()
             num_batches += 1
+            total_steps += 1
+            total_examples += b_ids.size(0)
 
         train_loss = train_loss / num_batches
         print(f"Epoch {epoch}: train loss :: {train_loss:.3f}.")
@@ -383,6 +468,33 @@ def train(args):
                 f"Early stopping at epoch {epoch} (no dev loss improvement for {args.early_stopping_patience} epochs)."
             )
             break
+
+    elapsed_sec = time.perf_counter() - train_start_time
+    ex_per_sec = (total_examples / elapsed_sec) if elapsed_sec > 0 else 0.0
+    steps_per_sec = (total_steps / elapsed_sec) if elapsed_sec > 0 else 0.0
+    print(
+        f"SFT speed: {elapsed_sec:.2f}s total, {ex_per_sec:.2f} examples/s, {steps_per_sec:.2f} steps/s."
+    )
+
+    metrics_out = getattr(args, "quant_metrics_out", "")
+    if metrics_out:
+        metrics = {
+            "qat_weight_bits": quant_bits,
+            "pretrain_dev_ce_loss": float(pretrain_dev_loss),
+            "train_elapsed_sec": float(elapsed_sec),
+            "train_examples_per_sec": float(ex_per_sec),
+            "train_steps_per_sec": float(steps_per_sec),
+            "estimated_model_size_mb_fp32": float(fp32_size_mb),
+            "estimated_model_size_mb_quantized": float(quant_size_mb),
+            "best_dev_ce_loss": (
+                float(best_dev_loss) if best_dev_loss < float("inf") else None
+            ),
+            "best_dev_epoch": int(best_epoch_dev),
+        }
+        os.makedirs(os.path.dirname(metrics_out) or ".", exist_ok=True)
+        with open(metrics_out, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"Saved quantization/SFT metrics to {metrics_out}")
 
 
 @torch.no_grad()
@@ -525,6 +637,19 @@ def get_args():
     )
     parser.add_argument(
         "--lora_alpha", type=float, default=16.0, help="LoRA scaling (2*rank)"
+    )
+    parser.add_argument(
+        "--qat_weight_bits",
+        type=int,
+        default=0,
+        choices=[0, 4, 8],
+        help="Enable quantization-aware SFT by fake-quantizing linear weights before training (0 disables).",
+    )
+    parser.add_argument(
+        "--quant_metrics_out",
+        type=str,
+        default="predictions/quant_sft_metrics.json",
+        help="Where to save model-size/speed/eval metrics for quantized SFT.",
     )
 
     args = parser.parse_args()
@@ -1206,9 +1331,7 @@ if modal is not None:
         top_p: float = 0.9,
     ):
         """Generate submission text from an existing checkpoint in Modal Volume (no training)."""
-        print(
-            f"Running generation from checkpoint {checkpoint_filename} on Modal..."
-        )
+        print(f"Running generation from checkpoint {checkpoint_filename} on Modal...")
         submission_txt = run_generation_and_get_submission.remote(
             checkpoint_filename=checkpoint_filename,
             held_out_path=held_out_sonnet_path,
@@ -1226,7 +1349,8 @@ if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "train":
         sys.argv = [sys.argv[0]] + sys.argv[2:]
         args = get_args()
-        args.filepath = f"{args.epochs}-{args.lr}-sonnet.pt"  # Save path.
+        qat_suffix = f"-qat{args.qat_weight_bits}" if args.qat_weight_bits > 0 else ""
+        args.filepath = f"{args.epochs}-{args.lr}-sonnet{qat_suffix}.pt"  # Save path.
         seed_everything(args.seed)  # Fix the seed for reproducibility.
         train(args)
         generate_submission_sonnets(args)
@@ -1234,7 +1358,8 @@ if __name__ == "__main__":
         pass
     else:
         args = get_args()
-        args.filepath = f"{args.epochs}-{args.lr}-sonnet.pt"  # Save path.
+        qat_suffix = f"-qat{args.qat_weight_bits}" if args.qat_weight_bits > 0 else ""
+        args.filepath = f"{args.epochs}-{args.lr}-sonnet{qat_suffix}.pt"  # Save path.
         seed_everything(args.seed)  # Fix the seed for reproducibility.
         train(args)
         generate_submission_sonnets(args)

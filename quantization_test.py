@@ -1,37 +1,140 @@
 import argparse
 import copy
 import os
-import tempfile
 import sys
+import tempfile
 import time
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 from einops import rearrange
 from torch.utils.data import DataLoader
+from transformers import GPT2Tokenizer
 
 from datasets import SonnetsDataset
 from sonnet_generation import SonnetGPT, add_arguments
 
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
-from torchao.quantization import quantize_, Float8WeightOnlyConfig
 
-quant_config = BitsAndBytesConfig(load_in_8bit=True)
+def _quantize_weight_tensor(w: torch.Tensor, bits: int):
+    if bits == 8:
+        qmax, qmin = 127, -128
+    elif bits == 4:
+        qmax, qmin = 7, -8
+    else:
+        raise ValueError(f"Unsupported bits={bits}")
+    max_abs = w.detach().abs().max()
+    scale = torch.clamp(max_abs / max(qmax, 1), min=1e-8)
+    q = torch.clamp(torch.round(w / scale), qmin, qmax).to(torch.int8)
+    return q, scale
 
 
-def estimate_flops_per_token_gpt2(model) -> float:
-    """Approximate FLOPs/token for decoder-only GPT."""
-    # SonnetGPT stores the base model at model.gpt with config-like args already baked in.
-    # Use dimensions from the loaded checkpoint args where available.
-    # Formula: per-layer ~ (12*d^2 + 2*d*seq_len) for seq_len contribution separately.
-    # Here we report the seq_len-independent base term and let caller add seq_len term.
-    d = model.gpt.config.hidden_size if hasattr(model.gpt, "config") else None
-    l = model.gpt.config.num_hidden_layers if hasattr(model.gpt, "config") else None
-    if d is None or l is None:
-        # Fallback for project custom GPT2Model
-        d = model.gpt.embed_layer.weight.shape[1]
-        l = len(model.gpt.gpt_layers)
-    return float(l * 12 * d * d)
+def _pack_int4(q: torch.Tensor) -> torch.Tensor:
+    q_u = (q + 8).to(torch.uint8).reshape(-1)
+    if q_u.numel() % 2 == 1:
+        q_u = torch.cat([q_u, torch.zeros(1, dtype=torch.uint8, device=q_u.device)])
+    lo = q_u[0::2] & 0x0F
+    hi = (q_u[1::2] & 0x0F) << 4
+    return lo | hi
+
+
+def _unpack_int4(packed: torch.Tensor, shape) -> torch.Tensor:
+    p = packed.reshape(-1)
+    lo = (p & 0x0F).to(torch.int16)
+    hi = ((p >> 4) & 0x0F).to(torch.int16)
+    vals = torch.empty(p.numel() * 2, dtype=torch.int16, device=p.device)
+    vals[0::2] = lo
+    vals[1::2] = hi
+    n = int(torch.tensor(shape).prod().item())
+    vals = vals[:n]
+    vals = (vals - 8).to(torch.int8)
+    return vals.reshape(*shape)
+
+
+class WeightOnlyQuantLinear(nn.Module):
+    def __init__(self, base: nn.Linear, bits: int):
+        super().__init__()
+        self.bits = bits
+        # Use actual loaded tensor shapes (can differ from module metadata in this codebase).
+        w = base.weight.detach().cpu()
+        self.weight_shape = tuple(w.shape)
+        self.out_features, self.in_features = self.weight_shape
+        q, scale = _quantize_weight_tensor(w, bits=bits)
+        self.register_buffer("scale", scale.detach().cpu())
+        if base.bias is not None:
+            self.register_buffer("bias", base.bias.detach().cpu())
+        else:
+            self.bias = None
+        if bits == 8:
+            self.register_buffer("qweight_int8", q.contiguous())
+            self.qweight_packed = None
+        else:
+            self.register_buffer("qweight_packed", _pack_int4(q).contiguous())
+            self.qweight_int8 = None
+
+    def _dequant_weight(self, device):
+        if self.bits == 8:
+            q = self.qweight_int8.to(device)
+        else:
+            q = _unpack_int4(
+                self.qweight_packed.to(device),
+                self.weight_shape,
+            )
+        return q.float() * self.scale.to(device)
+
+    def forward(self, x):
+        w = self._dequant_weight(x.device)
+        b = self.bias.to(x.device) if self.bias is not None else None
+        return F.linear(x, w, b)
+
+
+def _replace_linear_with_weight_only_quant(module: nn.Module, bits: int):
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear):
+            setattr(module, name, WeightOnlyQuantLinear(child, bits=bits))
+        else:
+            _replace_linear_with_weight_only_quant(child, bits=bits)
+
+
+def get_tokenizer(model):
+    tok = getattr(model, "tokenizer", None)
+    if tok is None:
+        tok = GPT2Tokenizer.from_pretrained("gpt2")
+        tok.pad_token = tok.eos_token
+    return tok
+
+
+def model_forward_logits(model, input_ids, attention_mask):
+    out = model(input_ids, attention_mask)
+    if isinstance(out, dict):
+        if "logits" in out:
+            return out["logits"]
+        if "last_hidden_state" in out and hasattr(model, "gpt"):
+            return model.gpt.hidden_state_to_token(out["last_hidden_state"])
+    if hasattr(out, "logits"):
+        return out.logits
+    return out
+
+
+@torch.no_grad()
+def generate_sequence(
+    model, input_ids, attention_mask, temperature: float, top_p: float
+):
+    if hasattr(model, "tokenizer") and hasattr(model, "generate"):
+        out = model.generate(input_ids, temperature=temperature, top_p=top_p)
+        if isinstance(out, tuple):
+            return out[0][0]
+        return out[0]
+    gen_ids = model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        do_sample=True,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=128,
+        pad_token_id=get_tokenizer(model).eos_token_id,
+    )
+    return gen_ids[0]
 
 
 def estimate_flops_per_token_with_seqlen(model, seq_len: int) -> float:
@@ -44,7 +147,6 @@ def estimate_flops_per_token_with_seqlen(model, seq_len: int) -> float:
 
 
 def serialized_model_size_mb(model) -> float:
-    """Measure serialized state_dict size to reflect quantized packing too."""
     with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp:
         tmp_path = tmp.name
     try:
@@ -71,7 +173,7 @@ def eval_dev_metrics(
         collate_fn=dev_dataset.collate_fn,
     )
 
-    pad_id = model.tokenizer.pad_token_id
+    pad_id = dev_dataset.tokenizer.pad_token_id
     total_loss = 0.0
     num_batches = 0
     correct = 0
@@ -80,7 +182,7 @@ def eval_dev_metrics(
     for batch in dev_loader:
         b_ids = batch["token_ids"].to(device)
         b_mask = batch["attention_mask"].to(device)
-        logits = model(b_ids, b_mask)
+        logits = model_forward_logits(model, b_ids, b_mask)
         logits = rearrange(logits[:, :-1].contiguous(), "b t d -> (b t) d")
         labels = b_ids[:, 1:].contiguous().flatten()
 
@@ -114,26 +216,34 @@ def eval_dev_chrf(
     model.eval()
     held_out_dataset = SonnetsDataset(dev_held_out_path)
     gold_dataset = SonnetsDataset(dev_gold_path)
+    tokenizer = get_tokenizer(model)
 
     generated_sonnets = []
     total_gen_time = 0.0
     total_samples = 0
     total_new_tokens = 0
+
     for batch in held_out_dataset:
-        encoding = model.tokenizer(
+        encoding = tokenizer(
             batch[1], return_tensors="pt", padding=False, truncation=True
         ).to(device)
         if device == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        output = model.generate(
-            encoding["input_ids"], temperature=temperature, top_p=top_p
-        )[0][0]
+        output = generate_sequence(
+            model,
+            input_ids=encoding["input_ids"],
+            attention_mask=encoding.get("attention_mask", None),
+            temperature=temperature,
+            top_p=top_p,
+        )
         if device == "cuda":
             torch.cuda.synchronize()
         total_gen_time += time.perf_counter() - t0
-        decoded_output = model.tokenizer.decode(output, skip_special_tokens=True)
+
+        decoded_output = tokenizer.decode(output, skip_special_tokens=True)
         generated_sonnets.append(f"{decoded_output}\n\n")
+
         total_samples += 1
         new_tokens = max(0, int(output.shape[0] - encoding["input_ids"].shape[1]))
         total_new_tokens += new_tokens
@@ -142,11 +252,13 @@ def eval_dev_chrf(
     max_len = min(len(true_sonnets), len(generated_sonnets))
     true_sonnets = true_sonnets[:max_len]
     generated_sonnets = generated_sonnets[:max_len]
+
     chrf = float(CHRF().corpus_score(generated_sonnets, [true_sonnets]).score)
     avg_sec_per_sample = (
         total_gen_time / total_samples if total_samples else float("inf")
     )
     toks_per_sec = total_new_tokens / total_gen_time if total_gen_time > 0 else 0.0
+
     return {
         "dev_chrf": chrf,
         "avg_gen_sec_per_sample": avg_sec_per_sample,
@@ -167,91 +279,29 @@ def make_variant(model, variant: str):
     variant = variant.lower().strip()
     m = copy.deepcopy(model).cpu().eval()
 
-    if variant == "fp32":  # 4 bytes
+    if variant == "fp32":
         return m.float(), "fp32"
 
-    if variant == "fp16":  # 2 bytes
+    if variant == "fp16":
         return m.to(dtype=torch.float16), "fp16"
 
-    if variant == "fp64":  # 8 bytes
+    if variant == "fp64":
         return m.to(dtype=torch.float64), "fp64"
 
     if variant == "bf16":
         return m.to(dtype=torch.bfloat16), "bf16"
 
-    if variant == "fp8":
-        quantize_(m, Float8WeightOnlyConfig())
-        return m, "fp8"
-
+    # True weight-only int8 quantization for all nn.Linear modules.
     if variant == "int8":
-        # IMPORTANT: bitsandbytes quantization must happen on load, not after.
-        # If SonnetGPT is a custom nn.Module, bnb won't quantize it automatically.
-        # You need it to be a HF model (AutoModelForCausalLM / GPT2LMHeadModel).
-        quant_config = BitsAndBytesConfig(load_in_8bit=True)
+        _replace_linear_with_weight_only_quant(m, bits=8)
+        return m, "int8_weight_only"
 
-        hf_model = AutoModelForCausalLM.from_pretrained(
-            "gpt2",  # <-- or your HF checkpoint dir if you saved it as HF
-            quantization_config=quant_config,
-            device_map="auto",
-        ).eval()
-
-        # If your checkpoint is *not* a HF checkpoint, you cannot directly load
-        # SonnetGPT weights into this without a conversion step.
-        return hf_model, "int8_bnb"
+    # True weight-only packed int4 quantization for all nn.Linear modules.
+    if variant == "int4":
+        _replace_linear_with_weight_only_quant(m, bits=4)
+        return m, "int4_weight_only"
 
     raise ValueError(f"Unknown variant: {variant}")
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument(
-        "--dev_gold_path", type=str, default="data/TRUE_sonnets_held_out_dev.txt"
-    )
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--seq_len", type=int, default=128)
-    parser.add_argument(
-        "--variants",
-        type=str,
-        default="fp32,bf16,int8",
-        help="Comma-separated: fp32,bf16,int8",
-    )
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
-    args = parser.parse_args()
-
-    if not os.path.exists(args.checkpoint):
-        raise FileNotFoundError(
-            f"Checkpoint not found: {args.checkpoint}. Download it locally first."
-        )
-
-    base = load_checkpoint_model(args.checkpoint)
-    flops_per_token = estimate_flops_per_token_with_seqlen(base, seq_len=args.seq_len)
-
-    print(f"checkpoint: {args.checkpoint}")
-    print(f"dev_gold_path: {args.dev_gold_path}")
-    print(f"seq_len for FLOPs estimate: {args.seq_len}")
-    print("\nvariant,dev_ce,token_acc,ppl,size_mb,approx_flops_per_token")
-
-    for v in [x.strip() for x in args.variants.split(",") if x.strip()]:
-        try:
-            model_v, label = make_variant(base, v)
-            eval_device = args.device
-            if label == "int8_dynamic" and args.device == "cuda":
-                # torch dynamic int8 quantization runs on CPU kernels.
-                eval_device = "cpu"
-            metrics = eval_dev_metrics(
-                model_v,
-                dev_gold_path=args.dev_gold_path,
-                batch_size=args.batch_size,
-                device=eval_device,
-            )
-            size_mb = serialized_model_size_mb(model_v)
-            print(
-                f"{label},{metrics['dev_ce']:.6f},{metrics['token_acc']:.6f},"
-                f"{metrics['ppl']:.6f},{size_mb:.2f},{flops_per_token:.0f}"
-            )
-        except Exception as e:
-            print(f"{v},ERROR,{e}")
 
 
 def _run_benchmark(
@@ -279,12 +329,11 @@ def _run_benchmark(
         "",
         "variant,device,dev_chrf,dev_ce,token_acc,ppl,avg_gen_sec_per_sample,gen_tokens_per_sec,size_mb,approx_flops_per_token",
     ]
+
     for v in [x.strip() for x in variants.split(",") if x.strip()]:
         try:
             model_v, label = make_variant(base, v)
             eval_device = device
-            if label == "int8_dynamic" and device == "cuda":
-                eval_device = "cpu"
             metrics = eval_dev_metrics(
                 model_v,
                 dev_gold_path=dev_gold_path,
@@ -307,7 +356,44 @@ def _run_benchmark(
             )
         except Exception as e:
             lines.append(f"{v},ERROR,{e}")
+
     return "\n".join(lines) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument(
+        "--dev_held_out_path", type=str, default="data/sonnets_held_out_dev.txt"
+    )
+    parser.add_argument(
+        "--dev_gold_path", type=str, default="data/TRUE_sonnets_held_out_dev.txt"
+    )
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--seq_len", type=int, default=128)
+    parser.add_argument(
+        "--variants",
+        type=str,
+        default="fp32,bf16,fp16,int8,int4",
+        help="Comma-separated: fp32,bf16,fp16,fp64,int8,int4",
+    )
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--temperature", type=float, default=1.2)
+    parser.add_argument("--top_p", type=float, default=0.9)
+    args = parser.parse_args()
+
+    report = _run_benchmark(
+        checkpoint=args.checkpoint,
+        dev_held_out_path=args.dev_held_out_path,
+        dev_gold_path=args.dev_gold_path,
+        batch_size=args.batch_size,
+        seq_len=args.seq_len,
+        variants=args.variants,
+        device=args.device,
+        temperature=args.temperature,
+        top_p=args.top_p,
+    )
+    print(report)
 
 
 try:
@@ -321,20 +407,8 @@ if modal is not None:
 
     quant_image = (
         modal.Image.debian_slim(python_version="3.11")
-        .pip_install(
-            "torch",
-            "transformers",
-            "einops",
-            "tqdm",
-            "requests",
-            "filelock",
-            "importlib-metadata",
-            "sacrebleu",
-            "scikit-learn",
-            "numpy",
-            "pandas",
-            "torchao",
-        )
+        .pip_install_from_requirements("requirements.txt")
+        .pip_install("numpy", "pandas")
         .workdir(MODAL_WORKSPACE)
         .add_local_dir(".", remote_path=MODAL_WORKSPACE, ignore=[".git", ".git/*"])
     )
@@ -354,7 +428,7 @@ if modal is not None:
         dev_gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
         batch_size: int = 8,
         seq_len: int = 128,
-        variants: str = "fp32,fp16,fp64,bf16,fp8,int8",
+        variants: str = "fp32,bf16,fp16,int8,int4",
         device: str = "cuda",
         temperature: float = 1.2,
         top_p: float = 0.9,
@@ -382,7 +456,7 @@ if modal is not None:
         dev_gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
         batch_size: int = 8,
         seq_len: int = 128,
-        variants: str = "fp32,bf16,int8",
+        variants: str = "fp32,bf16,fp16,int8,int4",
         device: str = "cuda",
         temperature: float = 1.2,
         top_p: float = 0.9,
@@ -407,9 +481,4 @@ if modal is not None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 2 and sys.argv[1] == "modal":
-        # Keep local CLI behavior explicit when desired.
-        sys.argv = [sys.argv[0]] + sys.argv[2:]
-        main()
-    else:
-        main()
+    main()
