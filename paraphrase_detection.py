@@ -29,7 +29,6 @@ from datasets import (
   ParaphraseDetectionTestDataset,
   load_paraphrase_data
 )
-from evaluation import model_eval_paraphrase, model_test_paraphrase
 from models.gpt2 import GPT2Model
 
 from optimizer import AdamW
@@ -98,6 +97,7 @@ def save_model(model, optimizer, args, filepath):
 
 def train(args):
   """Train GPT-2 for paraphrase detection on the Quora dataset."""
+  from evaluation import model_eval_paraphrase
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   # Create the data and its corresponding datasets and dataloader.
   para_train_data = load_paraphrase_data(args.para_train)
@@ -156,6 +156,7 @@ def train(args):
 @torch.no_grad()
 def test(args):
   """Evaluate your model on the dev and test datasets; save the predictions to disk."""
+  from evaluation import model_eval_paraphrase, model_test_paraphrase
   device = torch.device('cuda') if args.use_gpu else torch.device('cpu')
   saved = torch.load(args.filepath, weights_only=False)
 
@@ -265,7 +266,9 @@ if modal is not None:
   )
 
   para_volume = modal.Volume.from_name("paraphrase-checkpoints", create_if_missing=True)
+  sonnet_volume = modal.Volume.from_name("sonnet-checkpoints", create_if_missing=True)
   para_volumes = {MODAL_CHECKPOINTS: para_volume}
+  transfer_volumes = {MODAL_CHECKPOINTS: sonnet_volume}
   para_app = modal.App("paraphrase-detection")
 
   @para_app.function(
@@ -324,6 +327,108 @@ if modal is not None:
     with open(path, "rb") as f:
       return f.read()
 
+  @para_app.function(
+    image=para_image,
+    gpu="L4",
+    timeout=3600 * 2,
+    volumes=transfer_volumes,
+  )
+  def transfer_eval_modal(
+    checkpoint_filename: str = "best_25-0.001-sonnet.pt",
+    para_dev: str = "data/quora-dev.csv",
+    para_test: str = "data/quora-test-student.csv",
+    batch_size: int = 32,
+  ):
+    """Zero-shot transfer eval: load sonnet checkpoint backbone into ParaphraseGPT and evaluate dev/test."""
+    from evaluation import model_eval_paraphrase, model_test_paraphrase
+    sys.path.insert(0, MODAL_WORKSPACE)
+    device = torch.device("cuda")
+    checkpoint_path = os.path.join(MODAL_CHECKPOINTS, checkpoint_filename)
+    if not os.path.exists(checkpoint_path):
+      raise FileNotFoundError(
+        f"Checkpoint not found at {checkpoint_path}. "
+        f"Use path relative to /checkpoints in volume 'sonnet-checkpoints'."
+      )
+
+    saved = torch.load(checkpoint_path, weights_only=False, map_location=device)
+    sonnet_args = saved["args"]
+    model_size = getattr(sonnet_args, "model_size", "gpt2")
+
+    args = argparse.Namespace(
+      para_dev=os.path.join(MODAL_WORKSPACE, para_dev),
+      para_test=os.path.join(MODAL_WORKSPACE, para_test),
+      batch_size=batch_size,
+      model_size=model_size,
+      use_gpu=True,
+    )
+    args = add_arguments(args)
+
+    model = ParaphraseGPT(args).to(device)
+    gpt_state = {
+      k[len("gpt."):]: v
+      for k, v in saved["model"].items()
+      if k.startswith("gpt.")
+    }
+    missing, unexpected = model.gpt.load_state_dict(gpt_state, strict=False)
+    if missing:
+      print(f"Backbone load missing keys: {len(missing)}")
+    if unexpected:
+      print(f"Backbone load unexpected keys: {len(unexpected)}")
+    model.eval()
+
+    para_dev_data = load_paraphrase_data(args.para_dev)
+    para_test_data = load_paraphrase_data(args.para_test, split="test")
+    para_dev_data = ParaphraseDetectionDataset(para_dev_data, args)
+    para_test_data = ParaphraseDetectionTestDataset(para_test_data, args)
+
+    para_dev_dataloader = DataLoader(
+      para_dev_data,
+      shuffle=False,
+      batch_size=args.batch_size,
+      collate_fn=para_dev_data.collate_fn,
+    )
+    para_test_dataloader = DataLoader(
+      para_test_data,
+      shuffle=False,
+      batch_size=args.batch_size,
+      collate_fn=para_test_data.collate_fn,
+    )
+
+    dev_acc, dev_f1, dev_pred, _, dev_ids = model_eval_paraphrase(
+      para_dev_dataloader, model, device
+    )
+    test_pred, test_ids = model_test_paraphrase(para_test_dataloader, model, device)
+
+    run_dir = os.path.join(MODAL_CHECKPOINTS, "paraphrase_transfer")
+    os.makedirs(run_dir, exist_ok=True)
+    dev_out = os.path.join(run_dir, "para-dev-output.csv")
+    test_out = os.path.join(run_dir, "para-test-output.csv")
+
+    with open(dev_out, "w+") as f:
+      f.write("id \t Predicted_Is_Paraphrase \n")
+      for p, s in zip(dev_ids, dev_pred):
+        f.write(f"{p}, {s} \n")
+
+    with open(test_out, "w+") as f:
+      f.write("id \t Predicted_Is_Paraphrase \n")
+      for p, s in zip(test_ids, test_pred):
+        f.write(f"{p}, {s} \n")
+
+    sonnet_volume.commit()
+    return {
+      "dev_acc": float(dev_acc),
+      "dev_f1": float(dev_f1),
+      "dev_out": os.path.relpath(dev_out, MODAL_CHECKPOINTS),
+      "test_out": os.path.relpath(test_out, MODAL_CHECKPOINTS),
+    }
+
+  @para_app.function(image=para_image, volumes=transfer_volumes)
+  def read_sonnet_volume_file(relative_path: str) -> bytes:
+    sonnet_volume.reload()
+    path = os.path.join(MODAL_CHECKPOINTS, relative_path)
+    with open(path, "rb") as f:
+      return f.read()
+
   @para_app.local_entrypoint()
   def main_modal(
     run_name: str = "paraphrase_modal",
@@ -363,6 +468,36 @@ if modal is not None:
       f.write(test_bytes)
     print(f"Saved {para_dev_out}")
     print(f"Saved {para_test_out}")
+
+  @para_app.local_entrypoint()
+  def main_modal_transfer_eval(
+    checkpoint_filename: str = "best_25-0.001-sonnet.pt",
+    para_dev: str = "data/quora-dev.csv",
+    para_test: str = "data/quora-test-student.csv",
+    batch_size: int = 32,
+    dev_out: str = "predictions/transfer_from_sonnet_para_dev.csv",
+    test_out: str = "predictions/transfer_from_sonnet_para_test.csv",
+  ):
+    print("Running zero-shot transfer paraphrase eval on Modal GPU...")
+    result = transfer_eval_modal.remote(
+      checkpoint_filename=checkpoint_filename,
+      para_dev=para_dev,
+      para_test=para_test,
+      batch_size=batch_size,
+    )
+    print(f"Dev acc: {result['dev_acc']:.4f}")
+    print(f"Dev f1: {result['dev_f1']:.4f}")
+
+    dev_bytes = read_sonnet_volume_file.remote(result["dev_out"])
+    test_bytes = read_sonnet_volume_file.remote(result["test_out"])
+    os.makedirs(os.path.dirname(dev_out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(test_out) or ".", exist_ok=True)
+    with open(dev_out, "wb") as f:
+      f.write(dev_bytes)
+    with open(test_out, "wb") as f:
+      f.write(test_bytes)
+    print(f"Saved {dev_out}")
+    print(f"Saved {test_out}")
 
 
 if __name__ == "__main__":

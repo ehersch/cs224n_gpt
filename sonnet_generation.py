@@ -149,16 +149,16 @@ class WeightOnlyQuantLinear(nn.Module):
         else:
             raise ValueError(f"Unsupported bits={bits}")
 
-    def _dequant_weight(self, device):
+    def _dequant_weight(self, device, dtype):
         if self.bits == 8:
             q = self.qweight_int8.to(device)
         else:
             q = _unpack_int4(self.qweight_packed.to(device), self.weight_shape)
-        return q.float() * self.scale.to(device)
+        return (q.float() * self.scale.to(device)).to(dtype=dtype)
 
     def forward(self, x):
-        w = self._dequant_weight(x.device)
-        b = self.bias.to(x.device) if self.bias is not None else None
+        w = self._dequant_weight(x.device, x.dtype)
+        b = self.bias.to(x.device, dtype=x.dtype) if self.bias is not None else None
         return F.linear(x, w, b)
 
 

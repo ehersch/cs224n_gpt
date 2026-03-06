@@ -71,8 +71,12 @@ class WeightOnlyQuantLinear(nn.Module):
         else:
             self.register_buffer("qweight_packed", _pack_int4(q).contiguous())
             self.qweight_int8 = None
+        self._cached_weight = None
+        self._cached_bias = None
+        self._cache_device = None
+        self._cache_dtype = None
 
-    def _dequant_weight(self, device):
+    def _dequant_weight(self, device, dtype):
         if self.bits == 8:
             q = self.qweight_int8.to(device)
         else:
@@ -80,11 +84,28 @@ class WeightOnlyQuantLinear(nn.Module):
                 self.qweight_packed.to(device),
                 self.weight_shape,
             )
-        return q.float() * self.scale.to(device)
+        return (q.float() * self.scale.to(device)).to(dtype=dtype)
 
     def forward(self, x):
-        w = self._dequant_weight(x.device)
-        b = self.bias.to(x.device) if self.bias is not None else None
+        # Keep quantized linear math in the same dtype as incoming activations.
+        # Forcing fp16 on CUDA can mismatch with fp32 activations in this model.
+        target_dtype = x.dtype
+        if (
+            self._cached_weight is None
+            or self._cache_device != x.device
+            or self._cache_dtype != target_dtype
+        ):
+            self._cached_weight = self._dequant_weight(x.device, target_dtype)
+            self._cached_bias = (
+                self.bias.to(x.device, dtype=target_dtype)
+                if self.bias is not None
+                else None
+            )
+            self._cache_device = x.device
+            self._cache_dtype = target_dtype
+        w = self._cached_weight
+        b = self._cached_bias
+        x = x.to(dtype=target_dtype)
         return F.linear(x, w, b)
 
 
@@ -222,6 +243,21 @@ def eval_dev_chrf(
     total_gen_time = 0.0
     total_samples = 0
     total_new_tokens = 0
+
+    # Warmup one sample so setup/first-kernel overhead is not counted in speed.
+    warmup_prompt = held_out_dataset[0][1]
+    warmup_enc = tokenizer(
+        warmup_prompt, return_tensors="pt", padding=False, truncation=True
+    ).to(device)
+    _ = generate_sequence(
+        model,
+        input_ids=warmup_enc["input_ids"],
+        attention_mask=warmup_enc.get("attention_mask", None),
+        temperature=temperature,
+        top_p=top_p,
+    )
+    if device == "cuda":
+        torch.cuda.synchronize()
 
     for batch in held_out_dataset:
         encoding = tokenizer(
