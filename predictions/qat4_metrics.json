@@ -1,0 +1,11 @@
+{
+  "qat_weight_bits": 4,
+  "pretrain_dev_ce_loss": 8.488815307617188,
+  "train_elapsed_sec": 944.1491095831152,
+  "train_examples_per_sec": 1.248743432613713,
+  "train_steps_per_sec": 0.04766196307685928,
+  "estimated_model_size_mb_fp32": 476.953125,
+  "estimated_model_size_mb_quantized": 59.619140625,
+  "best_dev_ce_loss": 5.679663181304932,
+  "best_dev_epoch": 5
+}

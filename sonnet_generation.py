@@ -18,6 +18,7 @@ SFT training on Modal (GPU in the cloud):
 """
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -87,6 +88,86 @@ def _apply_qat_weight_fake_quant(module: nn.Module, bits: int):
             setattr(module, name, QATLinear(child, bits))
         else:
             _apply_qat_weight_fake_quant(child, bits)
+
+
+def _quantize_weight_tensor(w: torch.Tensor, bits: int):
+    if bits == 8:
+        qmax, qmin = 127, -128
+    elif bits == 4:
+        qmax, qmin = 7, -8
+    else:
+        raise ValueError(f"Unsupported bits={bits}")
+    max_abs = w.detach().abs().max()
+    scale = torch.clamp(max_abs / max(qmax, 1), min=1e-8)
+    q = torch.clamp(torch.round(w / scale), qmin, qmax).to(torch.int8)
+    return q, scale
+
+
+def _pack_int4(q: torch.Tensor) -> torch.Tensor:
+    q_u = (q + 8).to(torch.uint8).reshape(-1)
+    if q_u.numel() % 2 == 1:
+        q_u = torch.cat([q_u, torch.zeros(1, dtype=torch.uint8, device=q_u.device)])
+    lo = q_u[0::2] & 0x0F
+    hi = (q_u[1::2] & 0x0F) << 4
+    return lo | hi
+
+
+def _unpack_int4(packed: torch.Tensor, shape) -> torch.Tensor:
+    p = packed.reshape(-1)
+    lo = (p & 0x0F).to(torch.int16)
+    hi = ((p >> 4) & 0x0F).to(torch.int16)
+    vals = torch.empty(p.numel() * 2, dtype=torch.int16, device=p.device)
+    vals[0::2] = lo
+    vals[1::2] = hi
+    n = int(torch.tensor(shape).prod().item())
+    vals = vals[:n]
+    vals = (vals - 8).to(torch.int8)
+    return vals.reshape(*shape)
+
+
+class WeightOnlyQuantLinear(nn.Module):
+    """True weight-only quantized linear layer with int8 or packed int4 storage."""
+
+    def __init__(self, base: nn.Linear, bits: int):
+        super().__init__()
+        self.bits = bits
+        w = base.weight.detach().cpu()
+        self.weight_shape = tuple(w.shape)
+        self.out_features, self.in_features = self.weight_shape
+        q, scale = _quantize_weight_tensor(w, bits=bits)
+        self.register_buffer("scale", scale.detach().cpu())
+        if base.bias is not None:
+            self.register_buffer("bias", base.bias.detach().cpu())
+        else:
+            self.bias = None
+        if bits == 8:
+            self.register_buffer("qweight_int8", q.contiguous())
+            self.qweight_packed = None
+        elif bits == 4:
+            self.register_buffer("qweight_packed", _pack_int4(q).contiguous())
+            self.qweight_int8 = None
+        else:
+            raise ValueError(f"Unsupported bits={bits}")
+
+    def _dequant_weight(self, device):
+        if self.bits == 8:
+            q = self.qweight_int8.to(device)
+        else:
+            q = _unpack_int4(self.qweight_packed.to(device), self.weight_shape)
+        return q.float() * self.scale.to(device)
+
+    def forward(self, x):
+        w = self._dequant_weight(x.device)
+        b = self.bias.to(x.device) if self.bias is not None else None
+        return F.linear(x, w, b)
+
+
+def _replace_linear_with_weight_only_quant(module: nn.Module, bits: int):
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear):
+            setattr(module, name, WeightOnlyQuantLinear(child, bits=bits))
+        else:
+            _replace_linear_with_weight_only_quant(child, bits=bits)
 
 
 def _estimate_model_size_mb(model: nn.Module, weight_bits: int | None = None) -> float:
@@ -355,6 +436,14 @@ def save_model(model, optimizer, args, filepath):
     print(f"save the model to {filepath}")
 
 
+def _strip_qat_base_keys(state_dict):
+    """Convert QATLinear keys (... .base.weight) back to plain Linear keys (... .weight)."""
+    out = {}
+    for k, v in state_dict.items():
+        out[k.replace(".base.", ".")] = v
+    return out
+
+
 def train(args):
     """Train GPT-2 for sonnet generation with padding mask, grad clip, LR schedule, early stopping."""
     device = torch.device("cuda") if args.use_gpu else torch.device("cpu")
@@ -496,6 +585,57 @@ def train(args):
             json.dump(metrics, f, indent=2)
         print(f"Saved quantization/SFT metrics to {metrics_out}")
 
+    if getattr(args, "export_weight_only_quantized_checkpoint", False):
+        if quant_bits <= 0:
+            print(
+                "Skipping quantized export: enable --qat_weight_bits {4,8} for quantization-aware SFT first."
+            )
+        elif args.use_lora:
+            print(
+                "Skipping quantized export for LoRA run (not supported for this exporter)."
+            )
+        else:
+            src_ckpt = f"{args.epochs-1}_{args.filepath}"
+            if os.path.exists(src_ckpt):
+                saved_best = torch.load(
+                    src_ckpt, weights_only=False, map_location="cpu"
+                )
+                trained_state = saved_best["model"]
+            else:
+                trained_state = model.state_dict()
+
+            export_args = copy.deepcopy(args)
+            export_args.qat_weight_bits = 0
+            export_args.is_weight_only_quantized = True
+            export_args.weight_only_quant_bits = quant_bits
+
+            float_model = SonnetGPT(export_args).cpu().eval()
+            float_model.load_state_dict(
+                _strip_qat_base_keys(trained_state), strict=False
+            )
+            _replace_linear_with_weight_only_quant(float_model, bits=quant_bits)
+
+            quant_ckpt = (
+                getattr(args, "quantized_checkpoint_out", "")
+                or f"{args.epochs-1}_{args.filepath}.w{quant_bits}q.pt"
+            )
+            os.makedirs(os.path.dirname(quant_ckpt) or ".", exist_ok=True)
+            save_info = {
+                "model": float_model.state_dict(),
+                "optim": optimizer.state_dict(),
+                "args": export_args,
+                "system_rng": random.getstate(),
+                "numpy_rng": np.random.get_state(),
+                "torch_rng": torch.random.get_rng_state(),
+            }
+            torch.save(save_info, quant_ckpt)
+            if os.path.exists(quant_ckpt):
+                print(f"Saved true weight-only quantized checkpoint to {quant_ckpt}")
+            else:
+                print(
+                    f"WARNING: quantized checkpoint was not found after save: {quant_ckpt}"
+                )
+
 
 @torch.no_grad()
 def generate_submission_sonnets(args):
@@ -507,6 +647,10 @@ def generate_submission_sonnets(args):
     )
 
     model = SonnetGPT(saved["args"])
+    if getattr(saved["args"], "is_weight_only_quantized", False):
+        _replace_linear_with_weight_only_quant(
+            model, bits=int(getattr(saved["args"], "weight_only_quant_bits", 8))
+        )
     model.load_state_dict(saved["model"])
     model = model.to(device)
     model.eval()
@@ -515,7 +659,9 @@ def generate_submission_sonnets(args):
     held_out_sonnet_dataset = SonnetsDataset(args.held_out_sonnet_path)
 
     generated_sonnets = []
-    for batch in held_out_sonnet_dataset:
+    for batch in tqdm(
+        held_out_sonnet_dataset, desc="generate-held-out", disable=TQDM_DISABLE
+    ):
         sonnet_id = batch[0]
         encoding = model.tokenizer(
             batch[1], return_tensors="pt", padding=False, truncation=True
@@ -651,6 +797,22 @@ def get_args():
         default="predictions/quant_sft_metrics.json",
         help="Where to save model-size/speed/eval metrics for quantized SFT.",
     )
+    parser.add_argument(
+        "--export_weight_only_quantized_checkpoint",
+        action="store_true",
+        help="After QAT SFT, export a true packed weight-only quantized checkpoint for real size/speed eval.",
+    )
+    parser.add_argument(
+        "--quantized_checkpoint_out",
+        type=str,
+        default="",
+        help="Optional path for exported quantized checkpoint. Default: auto-name based on training checkpoint.",
+    )
+    parser.add_argument(
+        "--skip_generation",
+        action="store_true",
+        help="Train/export only; do not run held-out generation at end.",
+    )
 
     args = parser.parse_args()
     return args
@@ -711,7 +873,7 @@ if modal is not None:
 
     @app.function(
         image=sonnet_image,
-        gpu="L4",
+        gpu="L4:4",
         timeout=3600 * 2,  # 2 hours
         volumes=volumes,
     )
@@ -737,6 +899,10 @@ if modal is not None:
         checkpoint_subdir: str = "",
         run_name: str = "",
         init_checkpoint: str = "",
+        qat_weight_bits: int = 0,
+        quant_metrics_out: str = "",
+        export_weight_only_quantized_checkpoint: bool = False,
+        quantized_checkpoint_out: str = "",
     ):
         """Run SFT training on Modal. Dev CHRF every 5 epochs; early stop on dev CHRF."""
         sys.path.insert(0, MODAL_WORKSPACE)
@@ -761,7 +927,27 @@ if modal is not None:
             num_workers=num_workers,
             dev_held_out_path=os.path.join(MODAL_WORKSPACE, dev_held_out_path),
             dev_gold_path=os.path.join(MODAL_WORKSPACE, dev_gold_path),
+            qat_weight_bits=qat_weight_bits,
         )
+        if quant_metrics_out:
+            args.quant_metrics_out = (
+                quant_metrics_out
+                if os.path.isabs(quant_metrics_out)
+                else os.path.join(MODAL_CHECKPOINTS, quant_metrics_out)
+            )
+        else:
+            args.quant_metrics_out = ""
+        args.export_weight_only_quantized_checkpoint = (
+            export_weight_only_quantized_checkpoint
+        )
+        if quantized_checkpoint_out:
+            args.quantized_checkpoint_out = (
+                quantized_checkpoint_out
+                if os.path.isabs(quantized_checkpoint_out)
+                else os.path.join(MODAL_CHECKPOINTS, quantized_checkpoint_out)
+            )
+        else:
+            args.quantized_checkpoint_out = ""
         filename = (
             f"{epochs}-{lr}-sonnet-lora{lora_rank}-alpha{lora_alpha}.pt"
             if use_lora
@@ -875,7 +1061,17 @@ if modal is not None:
             if checkpoint_subdir
             else f"best_{args.filepath}"
         )
-        return {"final_checkpoint": final_name}
+        result = {"final_checkpoint": final_name}
+        if (
+            args.export_weight_only_quantized_checkpoint
+            and getattr(args, "quantized_checkpoint_out", "")
+            and os.path.exists(args.quantized_checkpoint_out)
+        ):
+            rel_quant = os.path.relpath(
+                args.quantized_checkpoint_out, MODAL_CHECKPOINTS
+            )
+            result["quantized_checkpoint"] = rel_quant
+        return result
 
     @app.function(
         image=sonnet_image,
@@ -1066,7 +1262,7 @@ if modal is not None:
         with open(path, "rb") as f:
             return f.read()
 
-    @app.function(image=sonnet_image, gpu="L4", volumes=volumes, timeout=600)
+    @app.function(image=sonnet_image, gpu="L4:4", volumes=volumes, timeout=600)
     def run_generation_and_get_submission(
         checkpoint_filename: str,
         held_out_path: str,
@@ -1109,6 +1305,8 @@ if modal is not None:
         sonnet_path: str = "data/sonnets.txt",
         held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
         sonnet_out: str = "predictions/generated_sonnets_dev.txt",
+        dev_held_out_path: str = "data/sonnets_held_out_dev.txt",
+        dev_gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
         epochs: int = 25,
         batch_size: int = 32,
         lr: float = 5e-5,
@@ -1116,6 +1314,11 @@ if modal is not None:
         use_lora: bool = False,
         lora_rank: int = 8,
         lora_alpha: float = 16.0,
+        qat_weight_bits: int = 0,
+        quant_metrics_out: str = "",
+        export_weight_only_quantized_checkpoint: bool = False,
+        quantized_checkpoint_out: str = "",
+        skip_generation: bool = False,
         temperature: float = 1.1,
         top_p: float = 0.9,
     ):
@@ -1131,6 +1334,12 @@ if modal is not None:
             use_lora=use_lora,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
+            dev_held_out_path=dev_held_out_path,
+            dev_gold_path=dev_gold_path,
+            qat_weight_bits=qat_weight_bits,
+            quant_metrics_out=quant_metrics_out,
+            export_weight_only_quantized_checkpoint=export_weight_only_quantized_checkpoint,
+            quantized_checkpoint_out=quantized_checkpoint_out,
             temperature=temperature,
             top_p=top_p,
         )
@@ -1138,6 +1347,13 @@ if modal is not None:
         print(
             f"Training complete. Final checkpoint: {final_checkpoint} (in Volume 'sonnet-checkpoints')."
         )
+        if "quantized_checkpoint" in result:
+            print(
+                f"Exported quantized checkpoint: {result['quantized_checkpoint']} (in Volume 'sonnet-checkpoints')."
+            )
+        if skip_generation:
+            print("Skipping generation as requested.")
+            return
         print("Running generation and downloading submission file...")
         submission_txt = run_generation_and_get_submission.remote(
             checkpoint_filename=final_checkpoint,
@@ -1353,7 +1569,8 @@ if __name__ == "__main__":
         args.filepath = f"{args.epochs}-{args.lr}-sonnet{qat_suffix}.pt"  # Save path.
         seed_everything(args.seed)  # Fix the seed for reproducibility.
         train(args)
-        generate_submission_sonnets(args)
+        if not args.skip_generation:
+            generate_submission_sonnets(args)
     elif modal is not None:
         pass
     else:
@@ -1362,4 +1579,5 @@ if __name__ == "__main__":
         args.filepath = f"{args.epochs}-{args.lr}-sonnet{qat_suffix}.pt"  # Save path.
         seed_everything(args.seed)  # Fix the seed for reproducibility.
         train(args)
-        generate_submission_sonnets(args)
+        if not args.skip_generation:
+            generate_submission_sonnets(args)
