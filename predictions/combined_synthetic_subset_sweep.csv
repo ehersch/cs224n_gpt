@@ -1,0 +1,4 @@
+synthetic_examples,base_examples,total_examples,dev_chrf,checkpoint,prediction_path
+100,131,231,42.34026630934401,synthetic_subset_sweep/best_gemini_flash_subset_100-25-0.001-sonnet-combined.pt,predictions/synthetic_subset_sweep/generated_sonnets_dev_100.txt
+500,131,631,41.66564306995585,synthetic_subset_sweep/best_gemini_flash_subset_500-25-0.001-sonnet-combined.pt,predictions/synthetic_subset_sweep/generated_sonnets_dev_500.txt
+1000,131,1113,42.091313636257745,synthetic_subset_sweep/best_gemini_flash_subset_1000-25-0.001-sonnet-combined.pt,predictions/synthetic_subset_sweep/generated_sonnets_dev_1000.txt

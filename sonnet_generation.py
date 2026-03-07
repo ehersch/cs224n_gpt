@@ -19,6 +19,7 @@ SFT training on Modal (GPU in the cloud):
 
 import argparse
 import copy
+import csv
 import json
 import os
 import random
@@ -215,6 +216,17 @@ def load_combined_sonnets(paths):
         sonnets = _load_sonnets_from_file(path)
         all_sonnets.extend(sonnets)
     return all_sonnets
+
+
+def limit_sonnets(sonnets, limit=None, seed=11711):
+    """Take a deterministic subset of sonnets when limit is provided."""
+    if limit is None or limit <= 0 or limit >= len(sonnets):
+        return list(sonnets)
+    rng = random.Random(seed)
+    indices = list(range(len(sonnets)))
+    rng.shuffle(indices)
+    chosen = sorted(indices[:limit])
+    return [sonnets[i] for i in chosen]
 
 
 class SonnetsFromListDataset(Dataset):
@@ -1082,6 +1094,7 @@ if modal is not None:
     def train_sft_combined(
         sonnet_path: str = "data/sonnets.txt",
         synthetic_sonnet_path: str = "synthetic_data/synthetic_sonnets.txt",
+        synthetic_limit: int = 0,
         held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
         epochs: int = 10,
         batch_size: int = 16,
@@ -1109,9 +1122,16 @@ if modal is not None:
 
         path1 = os.path.join(MODAL_WORKSPACE, sonnet_path)
         path2 = os.path.join(MODAL_WORKSPACE, synthetic_sonnet_path)
-        combined_sonnets = load_combined_sonnets([path1, path2])
+        base_sonnets = _load_sonnets_from_file(path1)
+        synthetic_sonnets = _load_sonnets_from_file(path2)
+        selected_synthetic = limit_sonnets(
+            synthetic_sonnets, limit=synthetic_limit, seed=seed
+        )
+        combined_sonnets = base_sonnets + selected_synthetic
         print(
-            f"Combined dataset: {len(combined_sonnets)} sonnets from {sonnet_path} + {synthetic_sonnet_path}"
+            f"Combined dataset: {len(combined_sonnets)} sonnets "
+            f"({len(base_sonnets)} base + {len(selected_synthetic)}/{len(synthetic_sonnets)} synthetic) "
+            f"from {sonnet_path} + {synthetic_sonnet_path}"
         )
 
         args = argparse.Namespace(
@@ -1252,7 +1272,12 @@ if modal is not None:
             if checkpoint_subdir
             else f"best_{args.filepath}"
         )
-        return {"final_checkpoint": final_name}
+        return {
+            "final_checkpoint": final_name,
+            "num_base_examples": len(base_sonnets),
+            "num_synthetic_examples": len(selected_synthetic),
+            "num_total_examples": len(combined_sonnets),
+        }
 
     @app.function(image=sonnet_image, volumes=volumes)
     def download_checkpoint(filename: str) -> bytes:
@@ -1299,6 +1324,27 @@ if modal is not None:
             lines.append(f"\n{sonnet[0]}\n")
             lines.append(sonnet[1])
         return "".join(lines)
+
+    @app.function(image=sonnet_image, volumes=volumes, timeout=600)
+    def evaluate_sonnet_predictions(
+        prediction_text: str,
+        gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
+    ) -> float:
+        """Compute chrF on Modal so local env does not need sacrebleu."""
+        sys.path.insert(0, MODAL_WORKSPACE)
+        from evaluation import test_sonnet
+
+        gold_full = os.path.join(MODAL_WORKSPACE, gold_path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        ) as tmp:
+            tmp.write(prediction_text)
+            tmp_path = tmp.name
+        try:
+            return float(test_sonnet(tmp_path, gold_full))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     @app.local_entrypoint()
     def main(
@@ -1482,6 +1528,7 @@ if modal is not None:
     def main_combined(
         sonnet_path: str = "data/sonnets.txt",
         synthetic_sonnet_path: str = "synthetic_data/synthetic_sonnets.txt",
+        synthetic_limit: int = 0,
         held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
         sonnet_out: str = "predictions/generated_sonnets_dev.txt",
         epochs: int = 25,
@@ -1505,6 +1552,7 @@ if modal is not None:
         result = train_sft_combined.remote(
             sonnet_path=sonnet_path,
             synthetic_sonnet_path=synthetic_sonnet_path,
+            synthetic_limit=synthetic_limit,
             held_out_sonnet_path=held_out_sonnet_path,
             epochs=epochs,
             batch_size=batch_size,
@@ -1537,6 +1585,149 @@ if modal is not None:
         with open(sonnet_out, "w") as f:
             f.write(submission_txt)
         print(f"Submission file saved to {sonnet_out}")
+
+    @app.local_entrypoint()
+    def main_combined_synthetic_sweep(
+        sonnet_path: str = "data/sonnets.txt",
+        synthetic_sonnet_path: str = "synthetic_data/synthetic_sonnets.txt",
+        synthetic_limits: str = "100,500,1000",
+        held_out_sonnet_path: str = "data/sonnets_held_out_dev.txt",
+        dev_gold_path: str = "data/TRUE_sonnets_held_out_dev.txt",
+        out_csv: str = "predictions/combined_synthetic_subset_sweep.csv",
+        out_plot: str = "predictions/plots/combined_synthetic_subset_sweep.png",
+        epochs: int = 25,
+        batch_size: int = 32,
+        lr: float = 1e-3,
+        model_size: str = "gpt2",
+        use_lora: bool = False,
+        lora_rank: int = 8,
+        lora_alpha: float = 16.0,
+        temperature: float = 1.2,
+        top_p: float = 0.9,
+        weight_decay: float = 0.0,
+        grad_clip_max_norm: float = 1.0,
+        early_stopping_patience: int = 5,
+        checkpoint_subdir: str = "synthetic_subset_sweep",
+        run_prefix: str = "gemini_subset",
+        init_checkpoint: str = "",
+    ):
+        """Run combined SFT across synthetic subset sizes, score dev chrF, save CSV + plot."""
+        limits = [int(x.strip()) for x in synthetic_limits.split(",") if x.strip()]
+        results = []
+
+        for synthetic_limit in limits:
+            run_name = f"{run_prefix}_{synthetic_limit}"
+            print(f"\n{'=' * 70}")
+            print(f"Synthetic subset sweep: {synthetic_limit} examples")
+            print(f"{'=' * 70}\n")
+            result = train_sft_combined.remote(
+                sonnet_path=sonnet_path,
+                synthetic_sonnet_path=synthetic_sonnet_path,
+                synthetic_limit=synthetic_limit,
+                held_out_sonnet_path=held_out_sonnet_path,
+                epochs=epochs,
+                batch_size=batch_size,
+                lr=lr,
+                model_size=model_size,
+                use_lora=use_lora,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                temperature=temperature,
+                top_p=top_p,
+                weight_decay=weight_decay,
+                grad_clip_max_norm=grad_clip_max_norm,
+                early_stopping_patience=early_stopping_patience,
+                checkpoint_subdir=checkpoint_subdir,
+                run_name=run_name,
+                init_checkpoint=init_checkpoint,
+            )
+            final_checkpoint = result["final_checkpoint"]
+            submission_txt = run_generation_and_get_submission.remote(
+                checkpoint_filename=final_checkpoint,
+                held_out_path=held_out_sonnet_path,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            chrf = evaluate_sonnet_predictions.remote(
+                prediction_text=submission_txt,
+                gold_path=dev_gold_path,
+            )
+
+            pred_out = os.path.join(
+                "predictions",
+                checkpoint_subdir,
+                f"generated_sonnets_dev_{synthetic_limit}.txt",
+            )
+            os.makedirs(os.path.dirname(pred_out), exist_ok=True)
+            with open(pred_out, "w", encoding="utf-8") as f:
+                f.write(submission_txt)
+
+            row = {
+                "synthetic_examples": synthetic_limit,
+                "base_examples": result["num_base_examples"],
+                "total_examples": result["num_total_examples"],
+                "dev_chrf": float(chrf),
+                "checkpoint": final_checkpoint,
+                "prediction_path": pred_out,
+            }
+            results.append(row)
+            print(
+                f"synthetic={synthetic_limit} | total={row['total_examples']} | dev chrF={row['dev_chrf']:.4f}"
+            )
+
+        os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "synthetic_examples",
+                    "base_examples",
+                    "total_examples",
+                    "dev_chrf",
+                    "checkpoint",
+                    "prediction_path",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(results)
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        xs = [row["synthetic_examples"] for row in results]
+        ys = [row["dev_chrf"] for row in results]
+        plt.style.use("seaborn-v0_8-whitegrid")
+        fig, ax = plt.subplots(figsize=(8.8, 5.6))
+        ax.plot(
+            xs,
+            ys,
+            marker="o",
+            linewidth=2.4,
+            markersize=7,
+            color="#2a6f97",
+        )
+        for x, y in zip(xs, ys):
+            ax.annotate(
+                f"{y:.2f}",
+                (x, y),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=10,
+            )
+        ax.set_title("Sonnet Generation Performance vs Synthetic Data Scale")
+        ax.set_xlabel("Number of Synthetic Gemini Flash Sonnets Used")
+        ax.set_ylabel("Dev chrF")
+        fig.tight_layout()
+
+        os.makedirs(os.path.dirname(out_plot) or ".", exist_ok=True)
+        fig.savefig(out_plot, dpi=220, bbox_inches="tight")
+        plt.close(fig)
+
+        print(f"Saved sweep results to {out_csv}")
+        print(f"Saved sweep plot to {out_plot}")
 
     @app.local_entrypoint()
     def generate_from_checkpoint(
