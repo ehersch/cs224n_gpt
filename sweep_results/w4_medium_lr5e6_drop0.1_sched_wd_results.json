@@ -1,0 +1,50 @@
+{
+  "run_name": "w4_medium_lr5e6_drop0.1_sched_wd",
+  "model_size": "gpt2-medium",
+  "batch_size": 4,
+  "lr": 5e-06,
+  "weight_decay": 0.01,
+  "clf_dropout": 0.1,
+  "epochs": 5,
+  "max_grad_norm": 1.0,
+  "use_scheduler": true,
+  "warmup_ratio": 0.06,
+  "grad_accum_steps": 1,
+  "seed": 11711,
+  "gpu": 0,
+  "best_dev_acc": 0.9006,
+  "best_dev_f1": 0.8945,
+  "epoch_results": [
+    {
+      "epoch": 0,
+      "train_loss": 0.5337,
+      "dev_acc": 0.8759,
+      "dev_f1": 0.8687
+    },
+    {
+      "epoch": 1,
+      "train_loss": 0.4881,
+      "dev_acc": 0.8872,
+      "dev_f1": 0.8817
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.4145,
+      "dev_acc": 0.8978,
+      "dev_f1": 0.8919
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.3503,
+      "dev_acc": 0.9004,
+      "dev_f1": 0.8945
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.3117,
+      "dev_acc": 0.9006,
+      "dev_f1": 0.8945
+    }
+  ],
+  "elapsed_seconds": 39236.8
+}

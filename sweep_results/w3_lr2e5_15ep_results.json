@@ -1,0 +1,110 @@
+{
+  "run_name": "w3_lr2e5_15ep",
+  "model_size": "gpt2",
+  "batch_size": 8,
+  "lr": 2e-05,
+  "weight_decay": 0.0,
+  "clf_dropout": 0.0,
+  "epochs": 15,
+  "max_grad_norm": 1.0,
+  "use_scheduler": false,
+  "warmup_ratio": 0.06,
+  "grad_accum_steps": 1,
+  "seed": 11711,
+  "gpu": 0,
+  "best_dev_acc": 0.8965,
+  "best_dev_f1": 0.8889,
+  "epoch_results": [
+    {
+      "epoch": 0,
+      "train_loss": 0.3704,
+      "dev_acc": 0.8725,
+      "dev_f1": 0.8656
+    },
+    {
+      "epoch": 1,
+      "train_loss": 0.3042,
+      "dev_acc": 0.8833,
+      "dev_f1": 0.8758
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.2784,
+      "dev_acc": 0.891,
+      "dev_f1": 0.8832
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.2531,
+      "dev_acc": 0.8929,
+      "dev_f1": 0.8862
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.224,
+      "dev_acc": 0.8933,
+      "dev_f1": 0.8868
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.1954,
+      "dev_acc": 0.8912,
+      "dev_f1": 0.8852
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.1695,
+      "dev_acc": 0.8915,
+      "dev_f1": 0.8857
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.1488,
+      "dev_acc": 0.8914,
+      "dev_f1": 0.885
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.1287,
+      "dev_acc": 0.8946,
+      "dev_f1": 0.8869
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.1131,
+      "dev_acc": 0.8965,
+      "dev_f1": 0.8889
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.0996,
+      "dev_acc": 0.8952,
+      "dev_f1": 0.8882
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.0887,
+      "dev_acc": 0.8953,
+      "dev_f1": 0.888
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.0783,
+      "dev_acc": 0.8946,
+      "dev_f1": 0.8868
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.0692,
+      "dev_acc": 0.896,
+      "dev_f1": 0.8884
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.0618,
+      "dev_acc": 0.8954,
+      "dev_f1": 0.8885
+    }
+  ],
+  "elapsed_seconds": 30640.2
+}

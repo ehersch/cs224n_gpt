@@ -1,0 +1,38 @@
+{
+  "run_name": "r1_lr2e5",
+  "model_size": "gpt2",
+  "batch_size": 8,
+  "lr": 2e-05,
+  "weight_decay": 0.0,
+  "clf_dropout": 0.0,
+  "epochs": 3,
+  "max_grad_norm": 1.0,
+  "use_scheduler": false,
+  "warmup_ratio": 0.06,
+  "grad_accum_steps": 1,
+  "seed": 11711,
+  "gpu": 0,
+  "best_dev_acc": 0.891,
+  "best_dev_f1": 0.8832,
+  "epoch_results": [
+    {
+      "epoch": 0,
+      "train_loss": 0.3704,
+      "dev_acc": 0.8725,
+      "dev_f1": 0.8656
+    },
+    {
+      "epoch": 1,
+      "train_loss": 0.3042,
+      "dev_acc": 0.8833,
+      "dev_f1": 0.8758
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.2784,
+      "dev_acc": 0.891,
+      "dev_f1": 0.8832
+    }
+  ],
+  "elapsed_seconds": 5861.4
+}
