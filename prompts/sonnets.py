@@ -5,12 +5,20 @@ Note, our sonnets dataset includes Shakespearean sonnets.
 """
 
 from os import access
+import os
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
+import asyncio
+import threading
+from openai import OpenAI
+from dotenv import load_dotenv
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import json
+
+load_dotenv(override=True)
 
 
 def access_llm(prompt, project, location, model_spec):
@@ -25,6 +33,19 @@ def access_llm(prompt, project, location, model_spec):
     # Generate a response
     response = model.generate_content(prompt)
     return response.text
+
+
+def access_llm_openrouter(prompt, model="google/gemini-2.5-pro"):
+    client = OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=8192,
+    )
+    return response.choices[0].message.content
 
 
 def save_response(response, path):
@@ -52,7 +73,7 @@ def prompt(starting_index: int) -> str:
 
 
 def generate_data():
-    model_spec = "gemini-2.5-flash"
+    model_spec = "gemini-2.5-pro"
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
 
@@ -60,8 +81,28 @@ def generate_data():
         p = prompt(start_idx + 1)
         repsonse = access_llm(p, project, location, model_spec)
 
-        path = "synthetic_data/synthetic_sonnets_2.txt"
+        path = "synthetic_data/synthetic_sonnets_pro.txt"
         save_response(repsonse, path)
+
+
+def _fetch_batch(start_idx):
+    """Fetch a single batch of 20 sonnets. Returns (start_idx, response_text)."""
+    p = prompt(start_idx + 1)
+    response = access_llm_openrouter(p, model="google/gemini-2.5-pro")
+    return start_idx, response
+
+
+def generate_data_openrouter(max_workers=10):
+    path = "synthetic_data/synthetic_sonnets_pro.txt"
+    write_lock = threading.Lock()
+    batches = list(range(0, 1000, 20))  # 50 batches
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_fetch_batch, idx): idx for idx in batches}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Generating sonnets (OpenRouter)"):
+            start_idx, response = future.result()
+            with write_lock:
+                save_response(response, path)
 
 
 def process_sonnets(path):
@@ -89,7 +130,7 @@ def process_sonnets(path):
 
 
 if __name__ == "__main__":
-    # generate_data()
+    generate_data_openrouter()
     # process_sonnets("synthetic_data/synthetic_sonnets_2.txt")
 
     ## This is the final format
