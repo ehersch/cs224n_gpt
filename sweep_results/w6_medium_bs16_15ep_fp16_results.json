@@ -1,0 +1,111 @@
+{
+  "run_name": "w6_medium_bs16_15ep_fp16",
+  "model_size": "gpt2-medium",
+  "batch_size": 16,
+  "lr": 2e-05,
+  "weight_decay": 0.01,
+  "clf_dropout": 0.0,
+  "epochs": 15,
+  "max_grad_norm": 1.0,
+  "use_scheduler": true,
+  "warmup_ratio": 0.06,
+  "grad_accum_steps": 1,
+  "fp16": true,
+  "seed": 11711,
+  "gpu": 0,
+  "best_dev_acc": 0.9109,
+  "best_dev_f1": 0.9051,
+  "epoch_results": [
+    {
+      "epoch": 0,
+      "train_loss": 0.3795,
+      "dev_acc": 0.8725,
+      "dev_f1": 0.8657
+    },
+    {
+      "epoch": 1,
+      "train_loss": 0.2575,
+      "dev_acc": 0.8888,
+      "dev_f1": 0.8833
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.1935,
+      "dev_acc": 0.9017,
+      "dev_f1": 0.8944
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.1509,
+      "dev_acc": 0.9015,
+      "dev_f1": 0.8955
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.1236,
+      "dev_acc": 0.9066,
+      "dev_f1": 0.9007
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.0972,
+      "dev_acc": 0.9035,
+      "dev_f1": 0.898
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.0759,
+      "dev_acc": 0.9059,
+      "dev_f1": 0.8999
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.057,
+      "dev_acc": 0.9067,
+      "dev_f1": 0.9007
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.0424,
+      "dev_acc": 0.9088,
+      "dev_f1": 0.9029
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.0304,
+      "dev_acc": 0.91,
+      "dev_f1": 0.9036
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.0206,
+      "dev_acc": 0.9091,
+      "dev_f1": 0.9035
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.0148,
+      "dev_acc": 0.9109,
+      "dev_f1": 0.9051
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.0108,
+      "dev_acc": 0.9102,
+      "dev_f1": 0.9043
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.0087,
+      "dev_acc": 0.9109,
+      "dev_f1": 0.905
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.0074,
+      "dev_acc": 0.9106,
+      "dev_f1": 0.9047
+    }
+  ],
+  "elapsed_seconds": 37178.8
+}

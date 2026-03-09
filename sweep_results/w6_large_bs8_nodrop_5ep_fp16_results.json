@@ -1,0 +1,51 @@
+{
+  "run_name": "w6_large_bs8_nodrop_5ep_fp16",
+  "model_size": "gpt2-large",
+  "batch_size": 8,
+  "lr": 2e-05,
+  "weight_decay": 0.01,
+  "clf_dropout": 0.0,
+  "epochs": 5,
+  "max_grad_norm": 1.0,
+  "use_scheduler": true,
+  "warmup_ratio": 0.06,
+  "grad_accum_steps": 1,
+  "fp16": true,
+  "seed": 11711,
+  "gpu": 0,
+  "best_dev_acc": 0.9096,
+  "best_dev_f1": 0.9036,
+  "epoch_results": [
+    {
+      "epoch": 0,
+      "train_loss": 0.3463,
+      "dev_acc": 0.8827,
+      "dev_f1": 0.8759
+    },
+    {
+      "epoch": 1,
+      "train_loss": 0.2409,
+      "dev_acc": 0.9007,
+      "dev_f1": 0.8941
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.1439,
+      "dev_acc": 0.9038,
+      "dev_f1": 0.8981
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.0595,
+      "dev_acc": 0.9083,
+      "dev_f1": 0.9025
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.0189,
+      "dev_acc": 0.9096,
+      "dev_f1": 0.9036
+    }
+  ],
+  "elapsed_seconds": 41689.8
+}

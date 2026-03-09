@@ -177,7 +177,8 @@ def train_and_eval(args):
             optimizer.zero_grad()
 
         train_loss = train_loss / num_batches
-        dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
+        with torch.cuda.amp.autocast(enabled=args.fp16):
+            dev_acc, dev_f1, *_ = model_eval_paraphrase(para_dev_dataloader, model, device)
 
         epoch_result = {
             "epoch": epoch,
@@ -226,6 +227,7 @@ def main():
     parser.add_argument("--use_scheduler", action="store_true")
     parser.add_argument("--warmup_ratio", type=float, default=0.06)
     parser.add_argument("--grad_accum_steps", type=int, default=1)
+    parser.add_argument("--fp16", action="store_true", help="Use mixed precision (fp16) training")
     parser.add_argument("--run_name", type=str, default="default")
     parser.add_argument("--output_dir", type=str, default="sweep_results")
     args = parser.parse_args()
@@ -252,6 +254,7 @@ def main():
         "use_scheduler": args.use_scheduler,
         "warmup_ratio": args.warmup_ratio,
         "grad_accum_steps": args.grad_accum_steps,
+        "fp16": args.fp16,
         "seed": args.seed,
         "gpu": args.gpu,
         "best_dev_acc": results["best_dev_acc"],
