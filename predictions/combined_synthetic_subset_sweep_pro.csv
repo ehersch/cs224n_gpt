@@ -1,0 +1,2 @@
+synthetic_examples,base_examples,total_examples,dev_chrf,checkpoint,prediction_path
+1,131,132,42.29285738295926,synthetic_subset_sweep/best_gemini_pro_subset_1-25-0.001-sonnet-combined.pt,predictions/synthetic_subset_sweep/generated_sonnets_dev_1.txt
