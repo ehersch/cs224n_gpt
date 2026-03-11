@@ -4,6 +4,8 @@
 > 
 > CS 224N Default Final Project: Build GPT-2
 
+__Full paper attached to repo.__
+
 # Introduction
 
 Large-scale compute and data has driven unprecedented advancements in natural language processing, full-parameter fine-tuning and data remains costly. We investigate the empirical trade-offs between downstream performance and resource utilization during the fine-tuning of GPT-2. We first establish full-parameter baselines across sentiment classification, cloze-style paraphrase detection, and sonnet generation. Building upon sonnet generation, we evaluate three methods of training efficiency: (1) parameter efficiency, mapping performance using Low-Rank Adaptation (LoRA), (2) memory efficiency, analyzing the memory footprint and performance of precision scaling and Quantization-Aware Fine-Tuning (QAFT), and (3) data efficiency, formulating a cost-versus-performance evaluation and robustness for synthetic data augmentation utilizing the Gemini 2.5 family (Flash Lite, Flash, and Pro).
@@ -25,8 +27,6 @@ With the INT4 format, post-training quantization significantly degrades performa
 
 # Insights
 First, we demonstrate that LoRA can match full fine-tuned performance in sonnet generation while reducing trainable parameters and mitigating overfitting. Second, while inference-time quantization degrades performance at lower precisions, QAFT effectively stabilizes performance on sonnet generation, but it risks task-specific overfitting and reduced zero-shot capabilities for paraphrase detection. Finally, our synthetic data evaluation using the Gemini 2.5 family reveals that while higher-quality data improves distillation, GPT-2's capacity limits prevent full knowledge transfer. Notably, augmenting training with synthetic sonnets preserves zero-shot paraphrase accuracy, suggesting this scale of augmentation does not induce catastrophic overfitting.
-
-__Full paper attached to repo.__
 
 ___
 
