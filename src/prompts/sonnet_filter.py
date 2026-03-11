@@ -1,8 +1,12 @@
 from ast import parse
+from pathlib import Path
 
 import pronouncing
 import re
 import json
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_SYNTHETIC = REPO_ROOT / "data" / "synthetic_data"
 
 
 def parse_sonnets(path):
@@ -50,7 +54,9 @@ def filter_sonnets(sonnet_lst):
         if has_rhyme(sonnet):
             data += [sonnet]
     print(len(data))
-    with open("synthetic_data/filtered_sonnets_2.json", "w") as json_file:
+    out_path = DATA_SYNTHETIC / "filtered_sonnets_2.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w") as json_file:
         json.dump(data, json_file, indent=4)
     return data
 
@@ -59,5 +65,5 @@ def filter_sonnets(sonnet_lst):
 #   for line in f
 
 if __name__ == "__main__":
-    lst = parse_sonnets("synthetic_data/synthetic_sonnets_2.txt")
+    lst = parse_sonnets(str(DATA_SYNTHETIC / "synthetic_sonnets_2.txt"))
     filter_sonnets(lst)

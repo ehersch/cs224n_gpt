@@ -1,3 +1,12 @@
+import sys
+from pathlib import Path
+
+_src = Path(__file__).resolve().parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 import torch
 from argparse import Namespace
 from torch.utils.data import DataLoader
@@ -11,17 +20,17 @@ from datasets import (
 from evaluation import model_eval_paraphrase, model_test_paraphrase
 
 # ckpt = "best_25-0.001-sonnet.pt"
-ckpt = "checkpoints/sonnet_gen_full_ft.pt"
+ckpt = str(_REPO_ROOT / "checkpoints" / "sonnet_gen_full_ft.pt")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 saved = torch.load(ckpt, map_location=device, weights_only=False)
 base_args = saved["args"]
 args = Namespace(
-    para_train="data/quora-train.csv",
-    para_dev="data/quora-dev.csv",
-    para_test="data/quora-test-student.csv",
-    para_dev_out="predictions/transfer_from_sonnet_para_dev.csv",
-    para_test_out="predictions/transfer_from_sonnet_para_test.csv",
+    para_train=str(_REPO_ROOT / "data" / "quora-train.csv"),
+    para_dev=str(_REPO_ROOT / "data" / "quora-dev.csv"),
+    para_test=str(_REPO_ROOT / "data" / "quora-test-student.csv"),
+    para_dev_out=str(_REPO_ROOT / "predictions" / "transfer_from_sonnet_para_dev.csv"),
+    para_test_out=str(_REPO_ROOT / "predictions" / "transfer_from_sonnet_para_test.csv"),
     batch_size=8,
     model_size=base_args.model_size,
     use_gpu=(device.type == "cuda"),

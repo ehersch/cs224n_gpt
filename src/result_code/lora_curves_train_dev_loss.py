@@ -6,12 +6,17 @@ Combined figure with one row of two subplots; legend on the right, not overlayin
 
 import json
 import os
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SWEEP_PATH = REPO_ROOT / "predictions" / "lora" / "sweep_results.json"
+RESULTS_DIR = REPO_ROOT / "results"
+
+
 def main():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    sweep_path = os.path.join(script_dir, "..", "sweep_results.json")
-    with open(sweep_path, "r") as f:
+    with open(SWEEP_PATH, "r") as f:
         results = json.load(f)
 
     batch16 = [
@@ -106,7 +111,8 @@ def main():
         bbox_to_anchor=(0.89, 0.5),
         fontsize="small",
     )
-    out_path = os.path.join(script_dir, "lora_curves_train_dev_loss.png")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RESULTS_DIR / "lora_curves_train_dev_loss.png"
     plt.savefig(out_path, dpi=150)
     print(f"Saved {out_path}")
     plt.show()

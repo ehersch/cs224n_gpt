@@ -7,11 +7,15 @@ The 1000 QA pairs cover diverse subjects: half are general across finance, sport
 """
 
 from os import access
+from pathlib import Path
 
 import vertexai
 from vertexai.generative_models import GenerativeModel
 from tqdm import tqdm
 import json
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_SYNTHETIC = REPO_ROOT / "data" / "synthetic_data"
 
 
 def access_llm(prompt, project, location, model_spec):
@@ -61,10 +65,11 @@ def generate_data():
     project = "robotic-gasket-487022-r0"
     location = "us-central1"
 
+    DATA_SYNTHETIC.mkdir(parents=True, exist_ok=True)
+    path = str(DATA_SYNTHETIC / "anti_hallucination_qa.txt")
     for batch_id in tqdm(range(0, 1), desc="Generating hallucination QA"):
         p = prompt(batch_id=batch_id, n_pairs=200)
         repsonse = access_llm(p, project, location, model_spec)
-        path = "synthetic_data/anti_hallucination_qa.txt"
         save_response(repsonse, path)
 
 
@@ -91,6 +96,6 @@ def process_data(path_in, path_out):
 if __name__ == "__main__":
     # generate_data()
     process_data(
-        "synthetic_data/anti_hallucination_qa.txt",
-        "synthetic_data/anti_hallucination_qa.json",
+        str(DATA_SYNTHETIC / "anti_hallucination_qa.txt"),
+        str(DATA_SYNTHETIC / "anti_hallucination_qa.json"),
     )

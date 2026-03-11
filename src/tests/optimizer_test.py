@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+_src = Path(__file__).resolve().parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
 import torch
 import numpy as np
 from optimizer import AdamW
@@ -25,8 +32,9 @@ def test_optimizer(opt_class) -> torch.Tensor:
         opt.step()
     return model.weight.detach()
 
-if __name__ == '__main__':
-    ref = torch.tensor(np.load("optimizer_test.npy"))
+if __name__ == "__main__":
+    _test_dir = Path(__file__).resolve().parent
+    ref = torch.tensor(np.load(_test_dir / "optimizer_test.npy"))
     actual = test_optimizer(AdamW)
     print(ref)
     print(actual)

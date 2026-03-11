@@ -5,12 +5,14 @@ Print dev chrF scores from sweep_results.json for entries that have a 'layers' f
 
 import json
 import os
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SWEEP_PATH = REPO_ROOT / "predictions" / "lora" / "sweep_results.json"
 
 
 def main():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    sweep_path = os.path.join(script_dir, "..", "sweep_results.json")
-    with open(sweep_path, "r") as f:
+    with open(SWEEP_PATH, "r") as f:
         results = json.load(f)
 
     with_layers = [r for r in results if "layers" in r]

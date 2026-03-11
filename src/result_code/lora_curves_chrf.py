@@ -6,12 +6,17 @@ LoRA ranks use viridis colormap; full fine-tuning is orange.
 
 import json
 import os
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+SWEEP_PATH = REPO_ROOT / "predictions" / "lora" / "sweep_results.json"
+RESULTS_DIR = REPO_ROOT / "results"
+
+
 def main():
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    sweep_path = os.path.join(script_dir, "..", "sweep_results.json")
-    with open(sweep_path, "r") as f:
+    with open(SWEEP_PATH, "r") as f:
         results = json.load(f)
 
     batch8 = [r for r in results if r.get("batch_size") == 16 and "dev_chrf" in r and "alpha" not in r and 'layer' not in r]
@@ -57,7 +62,8 @@ def main():
     ax.legend(loc="best", fontsize="small")
     ax.set_xscale("log")
     plt.tight_layout()
-    out_path = os.path.join(script_dir, "lora_curves_chrf.png")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = RESULTS_DIR / "lora_curves_chrf.png"
     plt.savefig(out_path, dpi=150)
     print(f"Saved {out_path}")
     plt.show()

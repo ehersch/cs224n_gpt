@@ -4,6 +4,13 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+_src = Path(__file__).resolve().parent.parent
+if str(_src) not in sys.path:
+    sys.path.insert(0, str(_src))
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 import torch
 import torch.nn.functional as F
@@ -400,10 +407,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument(
-        "--dev_held_out_path", type=str, default="data/sonnets_held_out_dev.txt"
+        "--dev_held_out_path",
+        type=str,
+        default=str(_REPO_ROOT / "data" / "sonnets_held_out_dev.txt"),
     )
     parser.add_argument(
-        "--dev_gold_path", type=str, default="data/TRUE_sonnets_held_out_dev.txt"
+        "--dev_gold_path",
+        type=str,
+        default=str(_REPO_ROOT / "data" / "TRUE_sonnets_held_out_dev.txt"),
     )
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--seq_len", type=int, default=128)
@@ -496,8 +507,10 @@ if modal is not None:
         device: str = "cuda",
         temperature: float = 1.2,
         top_p: float = 0.9,
-        out: str = "predictions/quantization/quant_report.csv",
+        out: str = None,
     ):
+        if out is None:
+            out = str(_REPO_ROOT / "predictions" / "quantization" / "quant_report.csv")
         report = run_quant_benchmark_modal.remote(
             checkpoint_in_volume=checkpoint_in_volume,
             dev_held_out_path=dev_held_out_path,

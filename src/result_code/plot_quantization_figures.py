@@ -7,8 +7,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-
-PLOTS_DIR = Path("predictions/plots")
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+PLOTS_DIR = REPO_ROOT / "results" / "plots"
 
 
 def _ensure_output_dir() -> None:

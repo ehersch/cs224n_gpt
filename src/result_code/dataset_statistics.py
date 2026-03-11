@@ -20,9 +20,10 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import pandas as pd
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
-OUTPUT_DIR = Path(__file__).resolve().parent / "dataset_stats_output"
-OUTPUT_DIR.mkdir(exist_ok=True)
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DATA_DIR = REPO_ROOT / "data"
+OUTPUT_DIR = REPO_ROOT / "results" / "dataset_stats_output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def file_label(filename: str) -> str:
