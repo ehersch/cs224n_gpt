@@ -28,6 +28,7 @@ With the INT4 format, post-training quantization significantly degrades performa
 ## A note on the implementation of extensions
 
 > We implemented LoRA from scratch, so we did not use the default Hugging Face package.
+
 > We used `bitsandbytes` for our implementation of quantization and did not do this from scratch.
 
 # Insights
