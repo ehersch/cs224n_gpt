@@ -25,6 +25,11 @@ We distill synthetic data from the Gemini 2.5 Family and perform SFT using subse
 
 With the INT4 format, post-training quantization significantly degrades performance. However, if we use QAFT, we still see considerable memory and latency reductions (78 to 103 tokens per second on inference). This introduces overfitting and a reduction in zero-shot performance on other tasks.
 
+## A note on the implementation of extensions
+
+> We implemented LoRA from scratch, so we did not use the default Hugging Face package.
+> We used `bitsandbytes` for our implementation of quantization and did not do this from scratch.
+
 # Insights
 First, we demonstrate that LoRA can match full fine-tuned performance in sonnet generation while reducing trainable parameters and mitigating overfitting. Second, while inference-time quantization degrades performance at lower precisions, QAFT effectively stabilizes performance on sonnet generation, but it risks task-specific overfitting and reduced zero-shot capabilities for paraphrase detection. Finally, our synthetic data evaluation using the Gemini 2.5 family reveals that while higher-quality data improves distillation, GPT-2's capacity limits prevent full knowledge transfer. Notably, augmenting training with synthetic sonnets preserves zero-shot paraphrase accuracy, suggesting this scale of augmentation does not induce catastrophic overfitting.
 
